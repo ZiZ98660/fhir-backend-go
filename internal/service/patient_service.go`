@@ -1,0 +1,77 @@
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"go-fhir-phase1/internal"
+	"go-fhir-phase1/internal/repository"
+)
+
+// PatientService handles the business logic for Patients.
+type PatientService struct {
+	repo *repository.PatientRepository
+}
+
+// NewPatientService creates a new service instance.
+func NewPatientService(repo *repository.PatientRepository) *PatientService {
+	return &PatientService{repo: repo}
+}
+
+// CreatePatient handles the logic of validating and saving a patient.
+func (s *PatientService) CreatePatient(ctx context.Context, p internal.Patient) (internal.Patient, error) {
+	// FHIR Rule: Family Name is required
+	if p.FamilyName == "" {
+		return internal.Patient{}, errors.New("family name is required")
+	}
+
+	// For now, we generate a simple ID. In Phase 4, this will be a UUID.
+	p.ID = "pt-fhir-123"
+
+	// Convert struct to JSON bytes for the JSONB column
+	data, err := json.Marshal(p)
+	if err != nil {
+		return internal.Patient{}, err
+	}
+
+	err = s.repo.SavePatient(ctx, p, data)
+	if err != nil {
+		return internal.Patient{}, err
+	}
+
+	return p, nil
+}
+
+// GetAllPatients retrieves and unmarshals all patients.
+func (s *PatientService) GetAllPatients(ctx context.Context) ([]internal.Patient, error) {
+	dataList, err := s.repo.GetPatients(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	patients := make([]internal.Patient, 0, len(dataList))
+	for _, data := range dataList {
+		var p internal.Patient
+		if err := json.Unmarshal(data, &p); err != nil {
+			continue // Skip corrupted records
+		}
+		patients = append(patients, p)
+	}
+
+	return patients, nil
+}
+
+// GetPatientByID fetches a specific patient.
+func (s *PatientService) GetPatientByID(ctx context.Context, id string) (internal.Patient, error) {
+	data, err := s.repo.GetPatientByID(ctx, id)
+	if err != nil {
+		return internal.Patient{}, err
+	}
+
+	var p internal.Patient
+	if err := json.Unmarshal(data, &p); err != nil {
+		return internal.Patient{}, err
+	}
+
+	return p, nil
+}
