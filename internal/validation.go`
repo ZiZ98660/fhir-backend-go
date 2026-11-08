@@ -1,7 +1,7 @@
 // LEARNING COMPARISON: explicit version of internal/validation.go.
-// This filename ends in a backtick, so the Go build ignores it.
-// This is a corrected teaching equivalent, not an exact historical snapshot.
-// Keep the running .go version; compare the repeated steps here side by side.
+// This filename ends in a backtick, so normal Go builds ignore it.
+// New components have no earlier historical implementation to restore.
+// Models and small workflow contracts retain the same definitions.
 
 package internal
 
@@ -122,6 +122,21 @@ func (o Observation) Validate() error {
 	}
 	if !o.Code.HasValue() {
 		return Invalid("observation requires code.text or code.coding.code")
+	}
+	// These newly modeled links accept only the local laboratory targets we
+	// support. Syntax validation does not prove target existence or ownership.
+	if err := labIdentifiers(o.Identifier); err != nil {
+		return err
+	}
+	for _, ref := range o.BasedOn {
+		if err := labReference(ref, "ServiceRequest"); err != nil {
+			return err
+		}
+	}
+	if o.Specimen != nil {
+		if err := labReference(*o.Specimen, "Specimen"); err != nil {
+			return err
+		}
 	}
 	_, err := PatientID(o.Subject.Reference)
 	return err

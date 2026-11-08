@@ -1,0 +1,128 @@
+// LEARNING COMPARISON: explicit version of internal/integration/postgres.go.
+// This filename ends in a backtick, so normal Go builds ignore it.
+// New components have no earlier historical implementation to restore.
+// Models and small workflow contracts retain the same definitions.
+
+package integration
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"go-fhir-phase1/internal"
+)
+
+type PostgresStore struct{ pool *pgxpool.Pool }
+
+func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
+
+func (s *PostgresStore) Receive(ctx context.Context, scope Scope, message Submission) (Receipt, bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Receipt{}, false, err
+	}
+	defer tx.Rollback(ctx)
+	// INSERT/ON CONFLICT serializes concurrent submissions of the same message.
+	// No receipt is returned until its transaction and audit event are committed.
+	id := "msg-" + rand.Text()
+	var receipt Receipt
+	err = tx.QueryRow(ctx, `INSERT INTO integration_messages
+		(id, tenant_id, source_id, message_id, result_id, content_hash, raw_payload, normalized_payload, state, reason)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'needs_reconciliation','patient-unmatched')
+		ON CONFLICT (tenant_id, source_id, message_id) DO NOTHING
+		RETURNING id, state, reason, received_at`, id, scope.TenantID, scope.SourceID,
+		message.Result.MessageID, message.Result.ResultID, message.ContentHash, message.RawPayload,
+		message.NormalizedPayload).Scan(&receipt.ID, &receipt.State, &receipt.Reason, &receipt.ReceivedAt)
+	// Unlike ordinary Exec, this INSERT uses QueryRow + RETURNING. DO NOTHING
+	// returns no row on a duplicate, so Scan's ErrNoRows is meaningful here.
+	if errors.Is(err, pgx.ErrNoRows) {
+		var existingHash string
+		if err := tx.QueryRow(ctx, `SELECT id, state, reason, received_at, content_hash
+			FROM integration_messages WHERE tenant_id=$1 AND source_id=$2 AND message_id=$3`,
+			scope.TenantID, scope.SourceID, message.Result.MessageID).
+			Scan(&receipt.ID, &receipt.State, &receipt.Reason, &receipt.ReceivedAt, &existingHash); err != nil {
+			return Receipt{}, false, err
+		}
+		if existingHash != message.ContentHash {
+			return Receipt{}, false, fmt.Errorf("%w: message id reused with different content", internal.ErrConflict)
+		}
+		return receipt, true, nil // No new work: deferred rollback releases the connection.
+	}
+	if err != nil {
+		return Receipt{}, false, err
+	}
+
+	// A new message ID must not sneak a second version of the same clinical
+	// result into processing. Lock its scoped result key, then check prior receipts.
+	// Different messages for this result serialize; different results can proceed.
+	resultKey := strings.Join([]string{scope.TenantID, scope.SourceID, message.Result.ResultID}, "\x1f")
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, resultKey); err != nil {
+		return Receipt{}, false, err
+	}
+	var seenResult bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM integration_messages
+		WHERE tenant_id=$1 AND source_id=$2 AND result_id=$3 AND id<>$4)`,
+		scope.TenantID, scope.SourceID, message.Result.ResultID, receipt.ID).Scan(&seenResult); err != nil {
+		return Receipt{}, false, err
+	}
+	var patientID, orderKey string
+	if seenResult {
+		receipt.Reason = "result-already-received"
+	} else {
+		// Resolve only a unique, explicitly provisioned namespace/value mapping.
+		// The parent lock prevents a concurrent patient deletion during this receipt.
+		err = tx.QueryRow(ctx, `SELECT p.id FROM integration_patient_mappings m
+		JOIN patients p ON p.id=m.patient_id
+		WHERE m.tenant_id=$1 AND m.source_id=$2 AND m.identifier_system=$3 AND m.identifier_value=$4
+		AND p.deleted_at IS NULL FOR SHARE OF p`, scope.TenantID, scope.SourceID,
+			message.Result.PatientIdentifier.System, message.Result.PatientIdentifier.Value).Scan(&patientID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return Receipt{}, false, err
+		}
+		if err == nil {
+			receipt.Reason = "order-unmatched-or-patient-mismatch"
+			err = tx.QueryRow(ctx, `SELECT order_key FROM integration_order_mappings
+			WHERE tenant_id=$1 AND source_id=$2 AND identifier_system=$3 AND identifier_value=$4 AND patient_id=$5`,
+				scope.TenantID, scope.SourceID, message.Result.OrderIdentifier.System, message.Result.OrderIdentifier.Value, patientID).Scan(&orderKey)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return Receipt{}, false, err
+			}
+			if err == nil {
+				receipt.State, receipt.Reason = "ready_for_transformation", ""
+			}
+		}
+	}
+	// Even ready means only that explicit mappings existed at receipt time.
+	// Transformation/delivery must recheck context; no FHIR resource is created here.
+	if _, err := tx.Exec(ctx, `UPDATE integration_messages SET state=$2, reason=$3,
+		patient_id=NULLIF($4,''), order_key=NULLIF($5,'') WHERE id=$1`,
+		receipt.ID, receipt.State, receipt.Reason, patientID, orderKey); err != nil {
+		return Receipt{}, false, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO integration_events (message_id,event_type)
+		VALUES ($1,'received'),($1,$2)`, receipt.ID, receipt.State); err != nil {
+		return Receipt{}, false, err
+	}
+	// This function owns the transaction: only it commits. If the event insert
+	// above fails, the deferred rollback also removes the pending receipt.
+	if err := tx.Commit(ctx); err != nil {
+		return Receipt{}, false, err
+	}
+	return receipt, false, nil
+}
+
+func (s *PostgresStore) Get(ctx context.Context, scope Scope, id string) (Receipt, error) {
+	var receipt Receipt
+	err := s.pool.QueryRow(ctx, `SELECT id,state,reason,received_at FROM integration_messages
+		WHERE id=$1 AND tenant_id=$2 AND source_id=$3`, id, scope.TenantID, scope.SourceID).
+		Scan(&receipt.ID, &receipt.State, &receipt.Reason, &receipt.ReceivedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Receipt{}, internal.ErrNotFound
+	}
+	return receipt, err
+}

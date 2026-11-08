@@ -1,0 +1,10 @@
+{
+  "resourceType": "ServiceRequest",
+  "id": "order-demo",
+  "identifier": [{"system": "https://example.org/synthetic-lis/orders", "value": "SYN-ORDER-1"}],
+  "status": "active",
+  "intent": "order",
+  "code": {"coding": [{"system": "https://example.org/fhir/CodeSystem/lab-tests", "code": "SYN-GLU"}]},
+  "subject": {"reference": "Patient/patient-demo"},
+  "authoredOn": "2026-11-08T07:00:00Z"
+}
