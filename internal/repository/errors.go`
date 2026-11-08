@@ -1,0 +1,10 @@
+// LEARNING COMPARISON: explicit version of internal/repository/errors.go.
+// This filename ends in a backtick, so the Go build ignores it.
+// This is a corrected teaching equivalent, not an exact historical snapshot.
+// Keep the running .go version; compare the repeated steps here side by side.
+
+package repository
+
+// COMPARISON: storage-error translation is repeated at repository call sites.
+// Query collection uses explicit Next, Scan, append, Err, and Close operations.
+// No storageError or collectData helper is used by the comparison repositories.

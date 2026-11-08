@@ -1,77 +1,313 @@
+// LEARNING COMPARISON: explicit version of internal/service/patient_service.go.
+// This filename ends in a backtick, so the Go build ignores it.
+// This is a corrected teaching equivalent, not an exact historical snapshot.
+// Keep the running .go version; compare the repeated steps here side by side.
+
 package service
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"go-fhir-phase1/internal"
 	"go-fhir-phase1/internal/repository"
+	"io"
+	"strconv"
+	"time"
+
+	jsonpatch "github.com/evanphx/json-patch/v5"
 )
 
-// PatientService handles the business logic for Patients.
-type PatientService struct {
-	repo *repository.PatientRepository
-}
+type PatientService struct{ repo repository.PatientStore }
 
-// NewPatientService creates a new service instance.
-func NewPatientService(repo *repository.PatientRepository) *PatientService {
+func NewPatientService(repo repository.PatientStore) *PatientService {
 	return &PatientService{repo: repo}
 }
 
-// CreatePatient handles the logic of validating and saving a patient.
 func (s *PatientService) CreatePatient(ctx context.Context, p internal.Patient) (internal.Patient, error) {
-	// FHIR Rule: Family Name is required
-	if p.FamilyName == "" {
-		return internal.Patient{}, errors.New("family name is required")
+	if err := p.Validate(); err != nil {
+		return internal.Patient{}, err
 	}
-
-	// For now, we generate a simple ID. In Phase 4, this will be a UUID.
-	p.ID = "pt-fhir-123"
-
-	// Convert struct to JSON bytes for the JSONB column
+	p.ID = "pt-" + rand.Text()
+	p.Meta = internal.Meta{VersionID: "1", LastUpdated: time.Now().UTC().Format(time.RFC3339Nano)}
 	data, err := json.Marshal(p)
 	if err != nil {
 		return internal.Patient{}, err
 	}
-
-	err = s.repo.SavePatient(ctx, p, data)
-	if err != nil {
+	if err := s.repo.SavePatient(ctx, p, data); err != nil {
 		return internal.Patient{}, err
 	}
-
 	return p, nil
 }
 
-// GetAllPatients retrieves and unmarshals all patients.
-func (s *PatientService) GetAllPatients(ctx context.Context) ([]internal.Patient, error) {
-	dataList, err := s.repo.GetPatients(ctx)
+func (s *PatientService) UpdatePatient(ctx context.Context, id string, resource internal.Patient, expectedVersion string) (internal.Patient, error) {
+	if !internal.ValidID(id) || resource.ID != id {
+		return internal.Patient{}, internal.Invalid("body id must match the resource id")
+	}
+	if err := resource.Validate(); err != nil {
+		return internal.Patient{}, err
+	}
+	current, err := s.GetPatientByID(ctx, id)
 	if err != nil {
-		return nil, err
+		return internal.Patient{}, err
+	}
+	if expectedVersion != "" && expectedVersion != current.Meta.VersionID {
+		return internal.Patient{}, internal.ErrPrecondition
 	}
 
-	patients := make([]internal.Patient, 0, len(dataList))
-	for _, data := range dataList {
-		var p internal.Patient
-		if err := json.Unmarshal(data, &p); err != nil {
-			continue // Skip corrupted records
+	// Explicit update steps, intentionally repeated in PUT and PATCH.
+	if resource.ID != current.ID {
+		return internal.Patient{}, internal.Invalid("resource id cannot change")
+	}
+
+	if err := resource.Validate(); err != nil {
+		return internal.Patient{}, err
+	}
+	n := 0
+	if current.Meta.VersionID != "" {
+		var err error
+		n, err = strconv.Atoi(current.Meta.VersionID)
+		if err != nil || n < 1 || n == int(^uint(0)>>1) {
+			return internal.Patient{}, fmt.Errorf("invalid stored resource version")
 		}
-		patients = append(patients, p)
 	}
+	resource.Meta = internal.Meta{VersionID: strconv.Itoa(n + 1), LastUpdated: time.Now().UTC().Format(time.RFC3339Nano)}
+	replacementJSON, marshalErr := json.Marshal(resource)
+	if marshalErr != nil {
+		return internal.Patient{}, marshalErr
+	}
+	if err := s.repo.UpdatePatient(ctx, resource, replacementJSON, current.Meta.VersionID); err != nil {
+		return internal.Patient{}, err
+	}
+	return resource, nil
 
-	return patients, nil
 }
 
-// GetPatientByID fetches a specific patient.
+func (s *PatientService) PatchPatient(ctx context.Context, id string, patchData []byte, version string) (internal.Patient, error) {
+	patch, err := jsonpatch.DecodePatch(patchData)
+	if err != nil || bytes.Equal(bytes.TrimSpace(patchData), []byte("null")) {
+		return internal.Patient{}, internal.Invalid("invalid JSON Patch document")
+	}
+	current, err := s.GetPatientByID(ctx, id)
+	if err != nil {
+		return internal.Patient{}, err
+	}
+	if version != "" && version != current.Meta.VersionID {
+		return internal.Patient{}, internal.ErrPrecondition
+	}
+	document, err := json.Marshal(current)
+	if err != nil {
+		return internal.Patient{}, err
+	}
+	options := jsonpatch.NewApplyOptions()
+	options.SupportNegativeIndices = false
+	options.AccumulatedCopySizeLimit = 1 << 20
+	patched, err := patch.ApplyWithOptions(document, options)
+	if err != nil {
+		return internal.Patient{}, internal.Invalid("JSON Patch could not be applied")
+	}
+	if len(patched) > 1<<20 {
+		return internal.Patient{}, internal.Invalid("patched patient is too large")
+	}
+	var p internal.Patient
+	decoder := json.NewDecoder(bytes.NewReader(patched))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&p); err != nil {
+		return internal.Patient{}, internal.Invalid("patch produced an unsupported patient: %v", err)
+	}
+
+	// Explicit update steps, intentionally repeated in PUT and PATCH.
+	if p.ID != current.ID {
+		return internal.Patient{}, internal.Invalid("resource id cannot change")
+	}
+
+	if err := p.Validate(); err != nil {
+		return internal.Patient{}, err
+	}
+	n := 0
+	if current.Meta.VersionID != "" {
+		var err error
+		n, err = strconv.Atoi(current.Meta.VersionID)
+		if err != nil || n < 1 || n == int(^uint(0)>>1) {
+			return internal.Patient{}, fmt.Errorf("invalid stored resource version")
+		}
+	}
+	p.Meta = internal.Meta{VersionID: strconv.Itoa(n + 1), LastUpdated: time.Now().UTC().Format(time.RFC3339Nano)}
+	replacementJSON, marshalErr := json.Marshal(p)
+	if marshalErr != nil {
+		return internal.Patient{}, marshalErr
+	}
+	if err := s.repo.UpdatePatient(ctx, p, replacementJSON, current.Meta.VersionID); err != nil {
+		return internal.Patient{}, err
+	}
+	return p, nil
+
+}
+
+func (s *PatientService) SearchPatients(ctx context.Context, identifier, searchTerm string) (internal.Bundle, error) {
+	data, err := s.repo.SearchPatients(ctx, identifier, searchTerm)
+	if err != nil {
+		return internal.Bundle{}, err
+	}
+
+	total := len(data)
+	bundle := internal.Bundle{ResourceType: "Bundle", Type: "searchset", Total: &total}
+	for _, storedData := range data {
+		var decoded *internal.Patient
+		decoder := json.NewDecoder(bytes.NewReader(storedData))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&decoded); err != nil {
+			return internal.Bundle{}, fmt.Errorf("decode stored resource: %w", err)
+		}
+		if decoded == nil {
+			return internal.Bundle{}, fmt.Errorf("stored resource is null")
+		}
+		if err := decoder.Decode(new(any)); err != io.EOF {
+			return internal.Bundle{}, fmt.Errorf("stored resource contains trailing data")
+		}
+		if !internal.ValidID(decoded.ID) {
+			return internal.Bundle{}, fmt.Errorf("invalid stored resource id")
+		}
+		if err := decoded.Validate(); err != nil {
+			return internal.Bundle{}, fmt.Errorf("invalid stored resource: %v", err)
+		}
+		bundle.Entry = append(bundle.Entry, internal.BundleEntry{Resource: *decoded})
+	}
+	return bundle, nil
+
+}
+
 func (s *PatientService) GetPatientByID(ctx context.Context, id string) (internal.Patient, error) {
+	if !internal.ValidID(id) {
+		return internal.Patient{}, internal.Invalid("invalid patient id")
+	}
 	data, err := s.repo.GetPatientByID(ctx, id)
 	if err != nil {
 		return internal.Patient{}, err
 	}
 
-	var p internal.Patient
-	if err := json.Unmarshal(data, &p); err != nil {
-		return internal.Patient{}, err
+	// Decode the concrete Patient here; no decodeStored[T] helper.
+	var decoded *internal.Patient
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return internal.Patient{}, fmt.Errorf("decode stored resource: %w", err)
+	}
+	if decoded == nil {
+		return internal.Patient{}, fmt.Errorf("stored resource is null")
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return internal.Patient{}, fmt.Errorf("stored resource contains trailing data")
+	}
+	if !internal.ValidID(decoded.ID) || decoded.ID != id {
+		return internal.Patient{}, fmt.Errorf("stored resource id is missing, invalid, or mismatched")
+	}
+	if err := decoded.Validate(); err != nil {
+		return internal.Patient{}, fmt.Errorf("invalid stored resource: %v", err)
+	}
+	return *decoded, nil
+
+}
+
+func (s *PatientService) DeletePatient(ctx context.Context, id, expectedVersion string) error {
+	if !internal.ValidID(id) {
+		return internal.Invalid("valid patient id is required")
+	}
+	return s.repo.DeletePatient(ctx, id, expectedVersion)
+}
+
+func (s *PatientService) GetPatientHistory(ctx context.Context, id string) (internal.Bundle, error) {
+	if !internal.ValidID(id) {
+		return internal.Bundle{}, internal.Invalid("invalid patient id")
+	}
+	versions, err := s.repo.GetPatientHistory(ctx, id)
+	if err != nil {
+		return internal.Bundle{}, err
 	}
 
-	return p, nil
+	total := len(versions)
+	bundle := internal.Bundle{ResourceType: "Bundle", Type: "history", Total: &total}
+	for _, version := range versions {
+		entry := internal.BundleEntry{
+			Request:  &internal.BundleRequest{Method: version.Method, URL: "Patient/" + id},
+			Response: &internal.BundleResponse{Status: "200", ETag: "W/\"" + version.VersionID + "\"", LastModified: version.RecordedAt.UTC().Format(time.RFC3339Nano)},
+		}
+		if version.Method == "POST" {
+			entry.Request.URL = "Patient"
+			entry.Response.Status = "201"
+		}
+		if version.Method == "DELETE" {
+			entry.Response.Status = "204"
+		} else {
+			resource, meta, err := patientVersionResource(version, id)
+			if err != nil {
+				return internal.Bundle{}, err
+			}
+			entry.Resource = resource
+			entry.Response.LastModified = meta.LastUpdated
+		}
+		bundle.Entry = append(bundle.Entry, entry)
+	}
+	return bundle, nil
+}
+
+func (s *PatientService) GetPatientVersion(ctx context.Context, id, version string) (json.RawMessage, internal.Meta, error) {
+	if !internal.ValidID(id) || !internal.ValidID(version) {
+		return nil, internal.Meta{}, internal.Invalid("invalid patient id or version")
+	}
+	entry, err := s.repo.GetPatientVersion(ctx, id, version)
+	if err != nil {
+		return nil, internal.Meta{}, err
+	}
+	if entry.Method == "DELETE" {
+		return nil, internal.Meta{}, internal.ErrGone
+	}
+	return patientVersionResource(entry, id)
+}
+
+// This concrete formatter is deliberately repeated in each resource's file.
+// It preserves unknown historical JSON properties and exact numeric values.
+func patientVersionResource(version repository.ResourceVersion, id string) (json.RawMessage, internal.Meta, error) {
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(version.Data, &document); err != nil {
+		return nil, internal.Meta{}, err
+	}
+	if document == nil {
+		return nil, internal.Meta{}, fmt.Errorf("stored resource version is null")
+	}
+	var header struct {
+		ID           string
+		ResourceType string
+	}
+	if err := json.Unmarshal(version.Data, &header); err != nil {
+		return nil, internal.Meta{}, err
+	}
+	if header.ID != id || header.ResourceType != "Patient" {
+		return nil, internal.Meta{}, fmt.Errorf("stored resource version has invalid identity")
+	}
+	var metadata map[string]json.RawMessage
+	if raw, ok := document["meta"]; ok {
+		if err := json.Unmarshal(raw, &metadata); err != nil {
+			return nil, internal.Meta{}, err
+		}
+	}
+	if metadata == nil {
+		metadata = make(map[string]json.RawMessage)
+	}
+	meta := internal.Meta{VersionID: version.VersionID}
+	if raw, ok := metadata["lastUpdated"]; ok {
+		if err := json.Unmarshal(raw, &meta.LastUpdated); err != nil {
+			return nil, internal.Meta{}, err
+		}
+	}
+	if meta.LastUpdated == "" {
+		meta.LastUpdated = version.RecordedAt.UTC().Format(time.RFC3339Nano)
+	}
+	metadata["versionId"], _ = json.Marshal(meta.VersionID)
+	metadata["lastUpdated"], _ = json.Marshal(meta.LastUpdated)
+	document["meta"], _ = json.Marshal(metadata)
+	data, err := json.Marshal(document)
+	return data, meta, err
 }

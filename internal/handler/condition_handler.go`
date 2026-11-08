@@ -1,0 +1,432 @@
+// LEARNING COMPARISON: explicit version of internal/handler/condition_handler.go.
+// This filename ends in a backtick, so the Go build ignores it.
+// This is a corrected teaching equivalent, not an exact historical snapshot.
+// Keep the running .go version; compare the repeated steps here side by side.
+
+package handler
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"go-fhir-phase1/internal"
+	"go-fhir-phase1/internal/service"
+	"io"
+	"log"
+	"mime"
+	"net/http"
+	"strings"
+	"time"
+)
+
+type ConditionHandler struct{ service *service.ConditionService }
+
+func NewConditionHandler(s *service.ConditionService) *ConditionHandler {
+	return &ConditionHandler{service: s}
+}
+
+func (h *ConditionHandler) HandleCondition(w http.ResponseWriter, r *http.Request) {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/Condition/"), "/")
+	if len(parts) >= 2 && parts[1] == "_history" {
+		h.handleConditionHistory(w, r, parts)
+		return
+	}
+
+	// Explicit URL parsing replaces requestID.
+	id := ""
+	var err error
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/Condition")
+	if path != "" {
+		id = strings.TrimPrefix(path, "/")
+		if !internal.ValidID(id) {
+			err = internal.Invalid("invalid resource path")
+		}
+	}
+	queryID := r.URL.Query().Get("id")
+	if err == nil {
+		if id != "" && queryID != "" && id != queryID {
+			err = internal.Invalid("path and query ids disagree")
+		}
+		if id == "" {
+			id = queryID
+		}
+		if id != "" && !internal.ValidID(id) {
+			err = internal.Invalid("invalid resource id")
+		}
+	}
+	if err != nil {
+		h.sendError(w, err)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		if id != "" {
+			c, err := h.service.GetConditionByID(r.Context(), id)
+			if err != nil {
+				h.sendError(w, err)
+				return
+			}
+
+			// Explicit success headers and encoding replace writeResource.
+			w.Header().Set("Content-Type", "application/fhir+json")
+			responseMeta := c.Meta
+			if responseMeta.VersionID != "" {
+				w.Header().Set("ETag", "W/\""+responseMeta.VersionID+"\"")
+			}
+			if modified, parseErr := time.Parse(time.RFC3339Nano, responseMeta.LastUpdated); parseErr == nil {
+				w.Header().Set("Last-Modified", modified.UTC().Format(http.TimeFormat))
+			}
+			if http.StatusOK == http.StatusCreated {
+				w.Header().Set("Location", scheme+"://"+r.Host+"/api/v1/Condition/"+c.ID)
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(c)
+
+			return
+		}
+		bundle, err := h.service.GetConditionsForPatient(r.Context(), r.URL.Query().Get("patient"))
+		if err != nil {
+			h.sendError(w, err)
+			return
+		}
+
+		for i := range bundle.Entry {
+			switch value := bundle.Entry[i].Resource.(type) {
+			case internal.Patient:
+				bundle.Entry[i].FullUrl = scheme + "://" + r.Host + "/api/v1/Patient/" + value.ID
+			case internal.Observation:
+				bundle.Entry[i].FullUrl = scheme + "://" + r.Host + "/api/v1/Observation/" + value.ID
+			case internal.Condition:
+				bundle.Entry[i].FullUrl = scheme + "://" + r.Host + "/api/v1/Condition/" + value.ID
+			}
+		}
+		w.Header().Set("Content-Type", "application/fhir+json")
+		_ = json.NewEncoder(w).Encode(bundle)
+
+	case http.MethodPost:
+		if id != "" {
+
+			w.Header().Set("Allow", "GET, PUT, PATCH, DELETE")
+			w.Header().Set("Content-Type", "application/fhir+json")
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_ = json.NewEncoder(w).Encode(internal.OperationOutcome{ResourceType: "OperationOutcome", Issue: []internal.Issue{{Severity: "error", Code: "not-supported", Diagnostics: "method not allowed for this resource path"}}})
+
+			return
+		}
+
+		// Concrete decoding, intentionally repeated for POST and PUT.
+		var c internal.Condition
+		mediaType, _, mediaErr := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if mediaErr != nil || (mediaType != "application/json" && mediaType != "application/fhir+json") {
+			h.sendError(w, fmt.Errorf("%w: expected application/fhir+json or application/json", internal.ErrUnsupportedMedia))
+			return
+		}
+		bodyData, bodyErr := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodySize))
+		if bodyErr != nil {
+			h.sendError(w, bodyErr)
+			return
+		}
+		decoder := json.NewDecoder(bytes.NewReader(bodyData))
+		decoder.DisallowUnknownFields()
+		var decoded *internal.Condition
+		if decodeErr := decoder.Decode(&decoded); decodeErr != nil {
+			h.sendError(w, internal.Invalid("invalid or unsupported JSON: %v", decodeErr))
+			return
+		}
+		if decoded == nil {
+			h.sendError(w, internal.Invalid("a resource object is required"))
+			return
+		}
+		if trailingErr := decoder.Decode(new(any)); trailingErr != io.EOF {
+			h.sendError(w, internal.Invalid("exactly one JSON resource is required"))
+			return
+		}
+		c = *decoded
+
+		created, err := h.service.CreateCondition(r.Context(), c)
+		if err != nil {
+			h.sendError(w, err)
+			return
+		}
+
+		// Explicit success headers and encoding replace writeResource.
+		w.Header().Set("Content-Type", "application/fhir+json")
+		responseMeta := created.Meta
+		if responseMeta.VersionID != "" {
+			w.Header().Set("ETag", "W/\""+responseMeta.VersionID+"\"")
+		}
+		if modified, parseErr := time.Parse(time.RFC3339Nano, responseMeta.LastUpdated); parseErr == nil {
+			w.Header().Set("Last-Modified", modified.UTC().Format(http.TimeFormat))
+		}
+		if http.StatusCreated == http.StatusCreated {
+			w.Header().Set("Location", scheme+"://"+r.Host+"/api/v1/Condition/"+created.ID)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(created)
+
+	case http.MethodPut, http.MethodPatch:
+		if id == "" {
+			h.sendError(w, internal.Invalid("resource id is required"))
+			return
+		}
+
+		// Read the client's optional version directly.
+		version := ""
+		var err error
+		matchHeader := r.Header.Get("If-Match")
+		if matchHeader != "" {
+			if !strings.HasPrefix(matchHeader, "W/\"") || !strings.HasSuffix(matchHeader, "\"") {
+				err = internal.Invalid("If-Match must be a single weak ETag, for example W/\"1\"")
+			} else {
+				version = strings.TrimSuffix(strings.TrimPrefix(matchHeader, "W/\""), "\"")
+				if !internal.ValidID(version) {
+					err = internal.Invalid("invalid If-Match version")
+				}
+			}
+		}
+
+		if err != nil {
+			h.sendError(w, err)
+			return
+		}
+		var updated internal.Condition
+		if r.Method == http.MethodPut {
+
+			// Concrete decoding, intentionally repeated for POST and PUT.
+			var resource internal.Condition
+			mediaType, _, mediaErr := mime.ParseMediaType(r.Header.Get("Content-Type"))
+			if mediaErr != nil || (mediaType != "application/json" && mediaType != "application/fhir+json") {
+				h.sendError(w, fmt.Errorf("%w: expected application/fhir+json or application/json", internal.ErrUnsupportedMedia))
+				return
+			}
+			bodyData, bodyErr := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodySize))
+			if bodyErr != nil {
+				h.sendError(w, bodyErr)
+				return
+			}
+			decoder := json.NewDecoder(bytes.NewReader(bodyData))
+			decoder.DisallowUnknownFields()
+			var decoded *internal.Condition
+			if decodeErr := decoder.Decode(&decoded); decodeErr != nil {
+				h.sendError(w, internal.Invalid("invalid or unsupported JSON: %v", decodeErr))
+				return
+			}
+			if decoded == nil {
+				h.sendError(w, internal.Invalid("a resource object is required"))
+				return
+			}
+			if trailingErr := decoder.Decode(new(any)); trailingErr != io.EOF {
+				h.sendError(w, internal.Invalid("exactly one JSON resource is required"))
+				return
+			}
+			resource = *decoded
+
+			updated, err = h.service.UpdateCondition(r.Context(), id, resource, version)
+		} else {
+
+			patchMedia, _, mediaErr := mime.ParseMediaType(r.Header.Get("Content-Type"))
+			if mediaErr != nil || patchMedia != "application/json-patch+json" {
+				h.sendError(w, fmt.Errorf("%w: expected application/json-patch+json", internal.ErrUnsupportedMedia))
+				return
+			}
+			data, bodyErr := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodySize))
+			if bodyErr != nil {
+				h.sendError(w, bodyErr)
+				return
+			}
+
+			updated, err = h.service.PatchCondition(r.Context(), id, data, version)
+		}
+		if err != nil {
+			h.sendError(w, err)
+			return
+		}
+
+		// Explicit success headers and encoding replace writeResource.
+		w.Header().Set("Content-Type", "application/fhir+json")
+		responseMeta := updated.Meta
+		if responseMeta.VersionID != "" {
+			w.Header().Set("ETag", "W/\""+responseMeta.VersionID+"\"")
+		}
+		if modified, parseErr := time.Parse(time.RFC3339Nano, responseMeta.LastUpdated); parseErr == nil {
+			w.Header().Set("Last-Modified", modified.UTC().Format(http.TimeFormat))
+		}
+		if http.StatusOK == http.StatusCreated {
+			w.Header().Set("Location", scheme+"://"+r.Host+"/api/v1/Condition/"+updated.ID)
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(updated)
+
+	case http.MethodDelete:
+
+		// Read the client's optional version directly.
+		version := ""
+		var err error
+		matchHeader := r.Header.Get("If-Match")
+		if matchHeader != "" {
+			if !strings.HasPrefix(matchHeader, "W/\"") || !strings.HasSuffix(matchHeader, "\"") {
+				err = internal.Invalid("If-Match must be a single weak ETag, for example W/\"1\"")
+			} else {
+				version = strings.TrimSuffix(strings.TrimPrefix(matchHeader, "W/\""), "\"")
+				if !internal.ValidID(version) {
+					err = internal.Invalid("invalid If-Match version")
+				}
+			}
+		}
+
+		if err != nil {
+			h.sendError(w, err)
+			return
+		}
+		if err := h.service.DeleteCondition(r.Context(), id, version); err != nil {
+			h.sendError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+
+		w.Header().Set("Allow", "GET, POST, PUT, PATCH, DELETE")
+		w.Header().Set("Content-Type", "application/fhir+json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(internal.OperationOutcome{ResourceType: "OperationOutcome", Issue: []internal.Issue{{Severity: "error", Code: "not-supported", Diagnostics: "method not allowed for this resource path"}}})
+
+	}
+}
+
+func (h *ConditionHandler) handleConditionHistory(w http.ResponseWriter, r *http.Request, parts []string) {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+
+	if (len(parts) != 2 && len(parts) != 3) || !internal.ValidID(parts[0]) {
+		h.sendError(w, internal.Invalid("invalid history path"))
+		return
+	}
+	id := parts[0]
+	for _, name := range []string{"_count", "_since", "_at", "_list"} {
+		if r.URL.Query().Has(name) {
+			h.sendError(w, internal.Invalid("history filters and pagination are not supported yet"))
+			return
+		}
+	}
+	if queryID := r.URL.Query().Get("id"); queryID != "" && queryID != id {
+		h.sendError(w, internal.Invalid("path and query ids disagree"))
+		return
+	}
+	if r.Method != http.MethodGet {
+
+		w.Header().Set("Allow", "GET")
+		w.Header().Set("Content-Type", "application/fhir+json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(internal.OperationOutcome{ResourceType: "OperationOutcome", Issue: []internal.Issue{{Severity: "error", Code: "not-supported", Diagnostics: "method not allowed for this resource path"}}})
+
+		return
+	}
+	if len(parts) == 3 {
+		resource, meta, err := h.service.GetConditionVersion(r.Context(), id, parts[2])
+		if err != nil {
+			h.sendError(w, err)
+			return
+		}
+
+		// Explicit success headers and encoding replace writeResource.
+		w.Header().Set("Content-Type", "application/fhir+json")
+		responseMeta := meta
+		if responseMeta.VersionID != "" {
+			w.Header().Set("ETag", "W/\""+responseMeta.VersionID+"\"")
+		}
+		if modified, parseErr := time.Parse(time.RFC3339Nano, responseMeta.LastUpdated); parseErr == nil {
+			w.Header().Set("Last-Modified", modified.UTC().Format(http.TimeFormat))
+		}
+		if http.StatusOK == http.StatusCreated {
+			w.Header().Set("Location", scheme+"://"+r.Host+"/api/v1/Condition/"+id)
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resource)
+
+		return
+	}
+	bundle, err := h.service.GetConditionHistory(r.Context(), id)
+	if err != nil {
+		h.sendError(w, err)
+		return
+	}
+	for i := range bundle.Entry {
+		bundle.Entry[i].FullUrl = (scheme + "://" + r.Host + "/api/v1/Condition/" + id)
+	}
+
+	for i := range bundle.Entry {
+		switch value := bundle.Entry[i].Resource.(type) {
+		case internal.Patient:
+			bundle.Entry[i].FullUrl = scheme + "://" + r.Host + "/api/v1/Patient/" + value.ID
+		case internal.Observation:
+			bundle.Entry[i].FullUrl = scheme + "://" + r.Host + "/api/v1/Observation/" + value.ID
+		case internal.Condition:
+			bundle.Entry[i].FullUrl = scheme + "://" + r.Host + "/api/v1/Condition/" + value.ID
+		}
+	}
+	w.Header().Set("Content-Type", "application/fhir+json")
+	_ = json.NewEncoder(w).Encode(bundle)
+
+}
+
+// The earlier code had a per-handler outcome writer. This explicit version keeps
+// its own error response method; the same implementation is repeated in all three
+// handlers instead of relying on shared sendError/WriteOutcome functions.
+func (h *ConditionHandler) sendError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	code := "exception"
+	message := "internal server error"
+	var tooLarge *http.MaxBytesError
+	switch {
+	case errors.Is(err, internal.ErrInvalid):
+		status = http.StatusBadRequest
+		code = "invalid"
+		message = err.Error()
+	case errors.Is(err, internal.ErrNotFound):
+		status = http.StatusNotFound
+		code = "not-found"
+		message = "resource not found"
+	case errors.Is(err, internal.ErrGone):
+		status = http.StatusGone
+		code = "deleted"
+		message = "resource deleted; previous versions are available through history"
+	case errors.Is(err, internal.ErrConflict):
+		status = http.StatusConflict
+		code = "conflict"
+		message = "resource conflict"
+	case errors.Is(err, internal.ErrPrecondition):
+		status = http.StatusPreconditionFailed
+		code = "conflict"
+		message = "resource version has changed; read it again before updating"
+	case errors.Is(err, internal.ErrUnsupportedMedia):
+		status = http.StatusUnsupportedMediaType
+		code = "not-supported"
+		message = err.Error()
+	case errors.As(err, &tooLarge):
+		status = http.StatusRequestEntityTooLarge
+		code = "too-long"
+		message = "request body exceeds 1 MiB"
+	case errors.Is(err, context.DeadlineExceeded):
+		status = http.StatusGatewayTimeout
+		code = "timeout"
+		message = "request timed out"
+	case errors.Is(err, context.Canceled):
+		status = http.StatusRequestTimeout
+		code = "timeout"
+		message = "request canceled"
+	default:
+		log.Printf("request failed: %v", err)
+	}
+	w.Header().Set("Content-Type", "application/fhir+json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(internal.OperationOutcome{ResourceType: "OperationOutcome", Issue: []internal.Issue{{Severity: "error", Code: code, Diagnostics: message}}})
+}

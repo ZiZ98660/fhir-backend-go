@@ -1,0 +1,13 @@
+// LEARNING COMPARISON: explicit version of internal/service/resources.go.
+// This filename ends in a backtick, so the Go build ignores it.
+// This is a corrected teaching equivalent, not an exact historical snapshot.
+// Keep the running .go version; compare the repeated steps here side by side.
+
+package service
+
+// COMPARISON: the generic shared algorithms are expanded in each *_service.go.
+// Each creation method assigns its own ID and metadata. Each search builds its
+// own Bundle and uses a concrete decoding loop. PUT and PATCH repeat the update
+// steps instead of calling replacePatient/replaceObservation/replaceCondition.
+// Each file keeps a concrete history JSON formatter, repeated across all three.
+// There are no generic resource algorithms in this comparison file.

@@ -1,0 +1,12 @@
+// LEARNING COMPARISON: explicit version of internal/repository/resource_writes.go.
+// This filename ends in a backtick, so the Go build ignores it.
+// This is a corrected teaching equivalent, not an exact historical snapshot.
+// Keep the running .go version; compare the repeated steps here side by side.
+
+package repository
+
+// COMPARISON: no table-mapping engine is needed in the explicit version.
+// UpdatePatient, UpdateObservation, and UpdateCondition each contain their SQL.
+// Each delete transaction repeats snapshot -> deleted_at -> deletion marker.
+// See the three *_repo.go files ending in a backtick.
+// This file deliberately defines no shared write functions.

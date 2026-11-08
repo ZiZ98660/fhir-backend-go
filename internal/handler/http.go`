@@ -1,0 +1,13 @@
+// LEARNING COMPARISON: explicit version of internal/handler/http.go.
+// This filename ends in a backtick, so the Go build ignores it.
+// This is a corrected teaching equivalent, not an exact historical snapshot.
+// Keep the running .go version; compare the repeated steps here side by side.
+
+package handler
+
+// COMPARISON: no shared HTTP functions are required by this explicit variant.
+// URL parsing, body checks, concrete decoding, response headers, Bundle writing,
+// version-header parsing, and method errors are repeated in each resource handler.
+// Each handler has its own error-writing method, like the earlier implementation.
+// A shared size constant is retained so both implementations use the same limit.
+const maxBodySize = 1 << 20

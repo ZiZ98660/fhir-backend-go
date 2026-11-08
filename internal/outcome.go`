@@ -1,0 +1,10 @@
+// LEARNING COMPARISON: explicit version of internal/outcome.go.
+// This filename ends in a backtick, so the Go build ignores it.
+// This is a corrected teaching equivalent, not an exact historical snapshot.
+// Keep the running .go version; compare the repeated steps here side by side.
+
+package internal
+
+// COMPARISON: outcome writing is repeated in each handler's sendError method and
+// in authentication middleware. This comparison file needs no shared writer.
+// The shared OperationOutcome structs stay in patient.go.

@@ -1,0 +1,267 @@
+// LEARNING COMPARISON: explicit version of cmd/phase4/main.go.
+// This filename ends in a backtick, so the Go build ignores it.
+// This is a corrected teaching equivalent, not an exact historical snapshot.
+// Keep the running .go version; compare the repeated steps here side by side.
+
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/joho/godotenv"
+)
+
+// =============================================================================
+// MODELS
+// =============================================================================
+
+type Gender int
+
+const (
+	GenderUnknown Gender = iota
+	GenderMale
+	GenderFemale
+	GenderOther
+)
+
+func (g Gender) String() string {
+	return [...]string{"unknown", "male", "female", "other"}[g]
+}
+
+type Meta struct {
+	VersionID   int    `json:"versionId"`
+	LastUpdated string `json:"lastUpdated"`
+}
+
+type Patient struct {
+	ResourceType string       `json:"resourceType"`
+	ID           string       `json:"id,omitempty"`
+	Meta         Meta         `json:"meta"`
+	Identifier   []Identifier `json:"identifier,omitempty"`
+	Active       bool         `json:"active"`
+	Name         []HumanName  `json:"name,omitempty"`
+	Gender       Gender       `json:"gender,omitempty"`
+	BirthDate    string       `json:"birthDate,omitempty"`
+	Address      []Address    `json:"address,omitempty"`
+}
+
+type Identifier struct {
+	System string `json:"system,omitempty"`
+	Value  string `json:"value,omitempty"`
+}
+
+type HumanName struct {
+	Family string   `json:"family,omitempty"`
+	Given  []string `json:"given,omitempty"`
+	Use    string   `json:"use,omitempty"`
+}
+
+type Address struct {
+	Line       []string `json:"line,omitempty"`
+	City       string   `json:"city,omitempty"`
+	District   string   `json:"district,omitempty"`
+	State      string   `json:"state,omitempty"`
+	PostalCode string   `json:"postalCode,omitempty"`
+	Country    string   `json:"country,omitempty"`
+}
+
+type Bundle struct {
+	ResourceType string        `json:"resourceType"`
+	Type         string        `json:"type"`
+	Total        int           `json:"total,omitempty"`
+	Entry        []BundleEntry `json:"entry,omitempty"`
+}
+
+type BundleEntry struct {
+	FullUrl  string      `json:"fullUrl,omitempty"`
+	Resource interface{} `json:"resource,omitempty"`
+}
+
+type OperationOutcome struct {
+	ResourceType string  `json:"resourceType"`
+	Issue        []Issue `json:"issue"`
+}
+
+type Issue struct {
+	Severity    string `json:"severity"`
+	Code        string `json:"code,omitempty"`
+	Diagnostics string `json:"diagnostics"`
+}
+
+// =============================================================================
+// REPOSITORY
+// =============================================================================
+
+type PatientRepository struct {
+	pool *pgxpool.Pool
+}
+
+func (r *PatientRepository) InitTable() error {
+	query := `CREATE TABLE IF NOT EXISTS patients (id TEXT PRIMARY KEY, resource_type TEXT NOT NULL, data JSONB NOT NULL);`
+	_, err := r.pool.Exec(context.Background(), query)
+	return err
+}
+
+func (r *PatientRepository) SavePatient(p Patient, data []byte) error {
+	query := `INSERT INTO patients (id, resource_type, data) VALUES ($1, $2, $3)`
+	_, err := r.pool.Exec(context.Background(), query, p.ID, p.ResourceType, data)
+	return err
+}
+
+func (r *PatientRepository) GetPatients() ([][]byte, error) {
+	rows, err := r.pool.Query(context.Background(), "SELECT data FROM patients")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results [][]byte
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			continue
+		}
+		results = append(results, data)
+	}
+	return results, nil
+}
+
+func (r *PatientRepository) GetPatientByID(id string) ([]byte, error) {
+	var data []byte
+	query := "SELECT data FROM patients WHERE id = $1"
+	err := r.pool.QueryRow(context.Background(), query, id).Scan(&data)
+	return data, err
+}
+
+// =============================================================================
+// SERVICE
+// =============================================================================
+
+type PatientService struct {
+	repo *PatientRepository
+}
+
+func (s *PatientService) CreatePatient(p Patient) (Patient, error) {
+	if len(p.Name) == 0 || p.Name[0].Family == "" {
+		return Patient{}, errors.New("at least one name with a family name is required")
+	}
+	if p.Gender < GenderUnknown || p.Gender > GenderOther {
+		return Patient{}, errors.New("invalid gender value")
+	}
+	p.ID = "pt-fhir-123"
+	p.Meta = Meta{
+		VersionID:   1,
+		LastUpdated: time.Now().Format(time.RFC3339),
+	}
+	data, _ := json.Marshal(p)
+	err := s.repo.SavePatient(p, data)
+	return p, err
+}
+
+func (s *PatientService) SearchPatients() (Bundle, error) {
+	dataList, err := s.repo.GetPatients()
+	if err != nil {
+		return Bundle{}, err
+	}
+	bundle := Bundle{
+		ResourceType: "Bundle",
+		Type:         "search",
+		Total:        len(dataList),
+	}
+	for _, data := range dataList {
+		var p Patient
+		json.Unmarshal(data, &p)
+		bundle.Entry = append(bundle.Entry, BundleEntry{
+			FullUrl:  "http://localhost:8080/api/v1/Patient/" + p.ID,
+			Resource: p,
+		})
+	}
+	return bundle, nil
+}
+
+func (s *PatientService) GetPatientByID(id string) (Patient, error) {
+	data, err := s.repo.GetPatientByID(id)
+	if err != nil {
+		return Patient{}, err
+	}
+	var p Patient
+	json.Unmarshal(data, &p)
+	return p, nil
+}
+
+// =============================================================================
+// HANDLER
+// =============================================================================
+
+type PatientHandler struct {
+	service *PatientService
+}
+
+func (h *PatientHandler) sendOutcome(w http.ResponseWriter, code int, severity, diagnostics string) {
+	w.WriteHeader(code)
+	outcome := OperationOutcome{
+		ResourceType: "OperationOutcome",
+		Issue: []Issue{
+			{Severity: severity, Diagnostics: diagnostics},
+		},
+	}
+	json.NewEncoder(w).Encode(outcome)
+}
+
+func (h *PatientHandler) HandlePatient(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/fhir+json")
+	if r.Method == http.MethodGet {
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			bundle, err := h.service.SearchPatients()
+			if err != nil {
+				h.sendOutcome(w, 500, "fatal", "failed to fetch")
+				return
+			}
+			json.NewEncoder(w).Encode(bundle)
+		} else {
+			p, err := h.service.GetPatientByID(id)
+			if err != nil {
+				h.sendOutcome(w, 404, "error", "not found")
+				return
+			}
+			json.NewEncoder(w).Encode(p)
+		}
+	} else if r.Method == http.MethodPost {
+		var p Patient
+		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+			h.sendOutcome(w, 400, "error", "invalid json")
+			return
+		}
+		created, err := h.service.CreatePatient(p)
+		if err != nil {
+			h.sendOutcome(w, 400, "error", err.Error())
+			return
+		}
+		w.WriteHeader(201)
+		json.NewEncoder(w).Encode(created)
+	}
+}
+
+// =============================================================================
+// MAIN
+// =============================================================================
+
+func main() {
+	godotenv.Load()
+	pool, _ := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
+	repo := &PatientRepository{pool: pool}
+	repo.InitTable()
+	svc := &PatientService{repo: repo}
+	hdl := &PatientHandler{service: svc}
+	http.HandleFunc("/api/v1/Patient", hdl.HandlePatient)
+	fmt.Println("Linear Server running on :8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
+}

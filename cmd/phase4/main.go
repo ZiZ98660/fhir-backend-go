@@ -8,22 +8,42 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 )
 
 // =============================================================================
-// MODELS (Equivalent to internal/patient.go)
+// MODELS
 // =============================================================================
+
+type Gender int
+
+const (
+	GenderUnknown Gender = iota
+	GenderMale
+	GenderFemale
+	GenderOther
+)
+
+func (g Gender) String() string {
+	return [...]string{"unknown", "male", "female", "other"}[g]
+}
+
+type Meta struct {
+	VersionID   int    `json:"versionId"`
+	LastUpdated string `json:"lastUpdated"`
+}
 
 type Patient struct {
 	ResourceType string       `json:"resourceType"`
 	ID           string       `json:"id,omitempty"`
+	Meta         Meta         `json:"meta"`
 	Identifier   []Identifier `json:"identifier,omitempty"`
 	Active       bool         `json:"active"`
 	Name         []HumanName  `json:"name,omitempty"`
-	Gender       string       `json:"gender,omitempty"`
+	Gender       Gender       `json:"gender,omitempty"`
 	BirthDate    string       `json:"birthDate,omitempty"`
 	Address      []Address    `json:"address,omitempty"`
 }
@@ -60,8 +80,19 @@ type BundleEntry struct {
 	Resource interface{} `json:"resource,omitempty"`
 }
 
+type OperationOutcome struct {
+	ResourceType string  `json:"resourceType"`
+	Issue        []Issue `json:"issue"`
+}
+
+type Issue struct {
+	Severity    string `json:"severity"`
+	Code        string `json:"code,omitempty"`
+	Diagnostics string `json:"diagnostics"`
+}
+
 // =============================================================================
-// REPOSITORY LAYER (Equivalent to internal/repository/postgres.go)
+// REPOSITORY
 // =============================================================================
 
 type PatientRepository struct {
@@ -105,7 +136,7 @@ func (r *PatientRepository) GetPatientByID(id string) ([]byte, error) {
 }
 
 // =============================================================================
-// SERVICE LAYER (Equivalent to internal/service/patient_service.go)
+// SERVICE
 // =============================================================================
 
 type PatientService struct {
@@ -116,7 +147,14 @@ func (s *PatientService) CreatePatient(p Patient) (Patient, error) {
 	if len(p.Name) == 0 || p.Name[0].Family == "" {
 		return Patient{}, errors.New("at least one name with a family name is required")
 	}
+	if p.Gender < GenderUnknown || p.Gender > GenderOther {
+		return Patient{}, errors.New("invalid gender value")
+	}
 	p.ID = "pt-fhir-123"
+	p.Meta = Meta{
+		VersionID:   1,
+		LastUpdated: time.Now().Format(time.RFC3339),
+	}
 	data, _ := json.Marshal(p)
 	err := s.repo.SavePatient(p, data)
 	return p, err
@@ -154,11 +192,22 @@ func (s *PatientService) GetPatientByID(id string) (Patient, error) {
 }
 
 // =============================================================================
-// HANDLER LAYER (Equivalent to internal/handler/patient_handler.go)
+// HANDLER
 // =============================================================================
 
 type PatientHandler struct {
 	service *PatientService
+}
+
+func (h *PatientHandler) sendOutcome(w http.ResponseWriter, code int, severity, diagnostics string) {
+	w.WriteHeader(code)
+	outcome := OperationOutcome{
+		ResourceType: "OperationOutcome",
+		Issue: []Issue{
+			{Severity: severity, Diagnostics: diagnostics},
+		},
+	}
+	json.NewEncoder(w).Encode(outcome)
 }
 
 func (h *PatientHandler) HandlePatient(w http.ResponseWriter, r *http.Request) {
@@ -166,22 +215,29 @@ func (h *PatientHandler) HandlePatient(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		id := r.URL.Query().Get("id")
 		if id == "" {
-			bundle, _ := h.service.SearchPatients()
+			bundle, err := h.service.SearchPatients()
+			if err != nil {
+				h.sendOutcome(w, 500, "fatal", "failed to fetch")
+				return
+			}
 			json.NewEncoder(w).Encode(bundle)
 		} else {
 			p, err := h.service.GetPatientByID(id)
 			if err != nil {
-				http.Error(w, "Not Found", 404)
+				h.sendOutcome(w, 404, "error", "not found")
 				return
 			}
 			json.NewEncoder(w).Encode(p)
 		}
 	} else if r.Method == http.MethodPost {
 		var p Patient
-		json.NewDecoder(r.Body).Decode(&p)
+		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+			h.sendOutcome(w, 400, "error", "invalid json")
+			return
+		}
 		created, err := h.service.CreatePatient(p)
 		if err != nil {
-			http.Error(w, err.Error(), 400)
+			h.sendOutcome(w, 400, "error", err.Error())
 			return
 		}
 		w.WriteHeader(201)
@@ -190,19 +246,16 @@ func (h *PatientHandler) HandlePatient(w http.ResponseWriter, r *http.Request) {
 }
 
 // =============================================================================
-// MAIN (The Assembler)
+// MAIN
 // =============================================================================
 
 func main() {
 	godotenv.Load()
 	pool, _ := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
-
 	repo := &PatientRepository{pool: pool}
 	repo.InitTable()
-
 	svc := &PatientService{repo: repo}
 	hdl := &PatientHandler{service: svc}
-
 	http.HandleFunc("/api/v1/Patient", hdl.HandlePatient)
 	fmt.Println("Linear Server running on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))

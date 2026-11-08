@@ -1,0 +1,40 @@
+// LEARNING COMPARISON: explicit version of internal/middleware/auth.go.
+// This filename ends in a backtick, so the Go build ignores it.
+// This is a corrected teaching equivalent, not an exact historical snapshot.
+// Keep the running .go version; compare the repeated steps here side by side.
+
+package middleware
+
+import (
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"go-fhir-phase1/internal"
+	"net/http"
+	"strings"
+	"time"
+)
+
+func AuthMiddleware(secret string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Fields(r.Header.Get("Authorization"))
+		if secret == "" || len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || subtle.ConstantTimeCompare([]byte(parts[1]), []byte(secret)) != 1 {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+
+			w.Header().Set("Content-Type", "application/fhir+json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(internal.OperationOutcome{ResourceType: "OperationOutcome", Issue: []internal.Issue{{Severity: "error", Code: "login", Diagnostics: "missing or invalid bearer token"}}})
+
+			return
+		}
+		next(w, r)
+	}
+}
+
+func RequestTimeout(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
