@@ -3,6 +3,18 @@
 A deliberately limited FHIR R4 resource API built with Go and PostgreSQL.
 The active entry point is `cmd/server`; `cmd/phase4` is an earlier experiment.
 
+## Integration Intake: First Slice
+
+The application now includes a separate synthetic laboratory-result intake module.
+It commits receipts, checks explicit patient/order mappings, and records whether
+each message needs reconciliation or is ready for a future transformation. It
+does not create a FHIR report or deliver to an EMR yet.
+
+See [the learning walkthrough](docs/integration-first-slice.md) for the supported
+JSON, curl example, database mappings, transaction logic, verified R4 resource
+structures, limits, and tests. The new ServiceRequest, Specimen and DiagnosticReport
+models are selected R4 fields with basic validation, not new resource endpoints.
+
 ## Learning Comparisons
 
 Every current non-test `.go` file has a neighboring comparison file whose name

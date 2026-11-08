@@ -1,0 +1,115 @@
+// LEARNING COMPARISON: explicit version of internal/handler/integration_handler.go.
+// This filename ends in a backtick, so normal Go builds ignore it.
+// New components have no earlier historical implementation to restore.
+// Models and small workflow contracts retain the same definitions.
+
+package handler
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"mime"
+	"net/http"
+	"strings"
+
+	"go-fhir-phase1/internal"
+	"go-fhir-phase1/internal/integration"
+)
+
+// IntegrationHandler exposes an application JSON contract, not a FHIR endpoint.
+type IntegrationHandler struct {
+	service *integration.Service
+	scope   integration.Scope
+}
+
+func NewIntegrationHandler(service *integration.Service, scope integration.Scope) *IntegrationHandler {
+	return &IntegrationHandler{service: service, scope: scope}
+}
+
+func (h *IntegrationHandler) HandleResults(w http.ResponseWriter, r *http.Request) {
+	const base = "/api/v1/integration/results"
+	path := strings.TrimPrefix(r.URL.Path, base)
+	if path == "" || path == "/" {
+		if r.Method != http.MethodPost {
+			// Explicit method response replaces the shared HTTP helper.
+			w.Header().Set("Allow", "POST")
+			w.Header().Set("Content-Type", "application/fhir+json")
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_ = json.NewEncoder(w).Encode(internal.OperationOutcome{ResourceType: "OperationOutcome", Issue: []internal.Issue{{Severity: "error", Code: "not-supported", Diagnostics: "method not allowed"}}})
+			return
+		}
+		// Repeat the media check and bounded read here for comparison.
+		var data []byte
+		media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil || media != "application/json" {
+			err = fmt.Errorf("%w: expected application/json", internal.ErrUnsupportedMedia)
+		} else {
+			data, err = io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodySize))
+		}
+		if err != nil {
+			integrationError(w, err)
+			return
+		}
+		receipt, duplicate, err := h.service.Submit(r.Context(), h.scope, data)
+		if err != nil {
+			integrationError(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Location", base+"/"+receipt.ID)
+		if duplicate {
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.WriteHeader(http.StatusAccepted)
+		}
+		_ = json.NewEncoder(w).Encode(struct {
+			integration.Receipt
+			Duplicate bool `json:"duplicate"`
+		}{receipt, duplicate})
+		return
+	}
+	if r.Method != http.MethodGet {
+		// Explicit method response replaces the shared HTTP helper.
+		w.Header().Set("Allow", "GET")
+		w.Header().Set("Content-Type", "application/fhir+json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(internal.OperationOutcome{ResourceType: "OperationOutcome", Issue: []internal.Issue{{Severity: "error", Code: "not-supported", Diagnostics: "method not allowed"}}})
+		return
+	}
+	id := strings.TrimPrefix(path, "/")
+	receipt, err := h.service.Get(r.Context(), h.scope, id)
+	if err != nil {
+		integrationError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(receipt)
+}
+
+// Explicit outcome writing replaces both sendError and WriteOutcome.
+func integrationError(w http.ResponseWriter, err error) {
+	status, code, diagnostics := http.StatusInternalServerError, "exception", "integration storage unavailable"
+	var tooLarge *http.MaxBytesError
+	switch {
+	case errors.Is(err, internal.ErrInvalid):
+		status, code, diagnostics = 400, "invalid", err.Error()
+	case errors.Is(err, internal.ErrConflict):
+		status, code, diagnostics = 409, "conflict", "resource conflict"
+	case errors.Is(err, internal.ErrNotFound):
+		status, code, diagnostics = 404, "not-found", "resource not found"
+	case errors.Is(err, internal.ErrUnsupportedMedia):
+		status, code, diagnostics = 415, "not-supported", err.Error()
+	case errors.As(err, &tooLarge):
+		status, code, diagnostics = 413, "too-long", "request body exceeds 1 MiB"
+	case errors.Is(err, context.DeadlineExceeded):
+		status, code, diagnostics = 504, "timeout", "request timed out"
+	case errors.Is(err, context.Canceled):
+		status, code, diagnostics = 408, "timeout", "request canceled"
+	}
+	w.Header().Set("Content-Type", "application/fhir+json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(internal.OperationOutcome{ResourceType: "OperationOutcome", Issue: []internal.Issue{{Severity: "error", Code: code, Diagnostics: diagnostics}}})
+}

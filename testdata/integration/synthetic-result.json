@@ -1,0 +1,25 @@
+{
+  "messageId": "demo-message-1",
+  "resultId": "demo-result-1",
+  "patientIdentifier": {
+    "system": "https://example.org/synthetic-lis/patients",
+    "value": "00001"
+  },
+  "orderIdentifier": {
+    "system": "https://example.org/synthetic-lis/orders",
+    "value": "SYN-ORDER-1"
+  },
+  "test": {
+    "system": "https://example.org/fhir/CodeSystem/lab-tests",
+    "code": "SYN-GLU",
+    "display": "Synthetic numeric glucose scenario"
+  },
+  "value": {
+    "value": 5.20,
+    "unit": "mmol/L",
+    "system": "http://unitsofmeasure.org",
+    "code": "mmol/L"
+  },
+  "status": "final",
+  "effectiveDateTime": "2026-11-08T09:00:00+01:00"
+}

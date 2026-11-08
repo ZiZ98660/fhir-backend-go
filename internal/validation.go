@@ -118,6 +118,21 @@ func (o Observation) Validate() error {
 	if !o.Code.HasValue() {
 		return Invalid("observation requires code.text or code.coding.code")
 	}
+	// These newly modeled links accept only the local laboratory targets we
+	// support. Syntax validation does not prove target existence or ownership.
+	if err := labIdentifiers(o.Identifier); err != nil {
+		return err
+	}
+	for _, ref := range o.BasedOn {
+		if err := labReference(ref, "ServiceRequest"); err != nil {
+			return err
+		}
+	}
+	if o.Specimen != nil {
+		if err := labReference(*o.Specimen, "Specimen"); err != nil {
+			return err
+		}
+	}
 	_, err := PatientID(o.Subject.Reference)
 	return err
 }

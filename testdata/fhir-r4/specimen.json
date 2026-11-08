@@ -1,0 +1,9 @@
+{
+  "resourceType": "Specimen",
+  "id": "specimen-demo",
+  "identifier": [{"system": "https://example.org/synthetic-lis/specimens", "value": "SYN-SAMPLE-1"}],
+  "status": "available",
+  "subject": {"reference": "Patient/patient-demo"},
+  "request": [{"reference": "ServiceRequest/order-demo"}],
+  "collection": {"collectedDateTime": "2026-11-08T07:30:00Z"}
+}
