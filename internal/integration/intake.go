@@ -191,7 +191,8 @@ func uniqueObjectKeys(raw []byte) error {
 		if !container {
 			return nil
 		}
-		if delim == '{' {
+		switch delim {
+		case '{':
 			seen := make(map[string]bool)
 			for decoder.More() {
 				key, err := decoder.Token()
@@ -208,13 +209,13 @@ func uniqueObjectKeys(raw []byte) error {
 					return err
 				}
 			}
-		} else if delim == '[' {
+		case '[':
 			for decoder.More() {
 				if err := visit(); err != nil {
 					return err
 				}
 			}
-		} else {
+		default:
 			return fmt.Errorf("unexpected delimiter")
 		}
 		_, err = decoder.Token() // Consume the closing delimiter validated by Decoder.

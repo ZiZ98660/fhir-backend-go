@@ -1,9 +1,5 @@
-// LEARNING COMPARISON: explicit version of internal/integration/intake.go.
-// This filename ends in a backtick, so normal Go builds ignore it.
-// New components have no earlier historical implementation to restore.
-// Models and small workflow contracts retain the same definitions.
-
-// Package integration coordinates exchange work separately from FHIR CRUD.
+// Learning copy of intake.go. The trailing backtick keeps it out of normal builds.
+// The intake feature is new, so this copy shows the same workflow in this package.
 // Package integration coordinates exchange work separately from FHIR CRUD.
 package integration
 
@@ -66,16 +62,10 @@ type Submission struct {
 	ContentHash       string
 }
 
-// Store is intentionally small: it describes what this workflow needs, not
-// every method that PostgreSQL can provide. Tests can implement the same methods.
-type Store interface {
-	Receive(context.Context, Scope, Submission) (Receipt, bool, error)
-	Get(context.Context, Scope, string) (Receipt, error)
-}
+// This direct version stores the concrete database implementation.
+type Service struct{ store *PostgresStore }
 
-type Service struct{ store Store }
-
-func NewService(store Store) *Service { return &Service{store: store} }
+func NewService(store *PostgresStore) *Service { return &Service{store: store} }
 
 func (s *Service) Submit(ctx context.Context, scope Scope, raw []byte) (Receipt, bool, error) {
 	if !internal.ValidID(scope.TenantID) || !internal.ValidID(scope.SourceID) {

@@ -19,20 +19,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type ObservationStore interface {
-	InitTable(context.Context) error
-	SaveObservation(context.Context, internal.Observation, []byte) error
-	GetObservationsByPatient(context.Context, string) ([][]byte, error)
-	GetObservationByID(context.Context, string) ([]byte, error)
-	UpdateObservation(context.Context, internal.Observation, []byte, string) error
-	DeleteObservation(context.Context, string, string) error
-	GetObservationHistory(context.Context, string) ([]ResourceVersion, error)
-	GetObservationVersion(context.Context, string, string) (ResourceVersion, error)
-}
-
 type ObservationRepository struct{ pool *pgxpool.Pool }
 
-func NewObservationRepository(pool *pgxpool.Pool) ObservationStore {
+func NewObservationRepository(pool *pgxpool.Pool) *ObservationRepository {
 	return &ObservationRepository{pool: pool}
 }
 
@@ -84,10 +73,7 @@ func (r *ObservationRepository) SaveObservation(ctx context.Context, o internal.
 	result, err := tx.Exec(ctx, `INSERT INTO observations (id, resource_type, patient_id, data)
  SELECT $1, $2, $3, $4 FROM patients WHERE id = $3 AND deleted_at IS NULL FOR SHARE`, o.ID, o.ResourceType, patientID, data)
 	if err != nil {
-		// Translate the database error here instead of calling a shared mapper.
-		if errors.Is(err, pgx.ErrNoRows) {
-			return internal.ErrNotFound
-		}
+		// Exec reports constraint/database errors; ErrNoRows applies to QueryRow.Scan.
 		var postgresError0 *pgconn.PgError
 		if errors.As(err, &postgresError0) && postgresError0.Code == "23505" {
 			return fmt.Errorf("%w: resource id already exists", internal.ErrConflict)
@@ -103,10 +89,6 @@ func (r *ObservationRepository) SaveObservation(ctx context.Context, o internal.
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO observation_history (resource_id, version_id, data, method)
  VALUES ($1, $2, $3, 'POST')`, o.ID, version, data); err != nil {
-		// Translate the database error here instead of calling a shared mapper.
-		if errors.Is(err, pgx.ErrNoRows) {
-			return internal.ErrNotFound
-		}
 		var postgresError1 *pgconn.PgError
 		if errors.As(err, &postgresError1) && postgresError1.Code == "23505" {
 			return fmt.Errorf("%w: resource id already exists", internal.ErrConflict)
@@ -221,9 +203,6 @@ func (r *ObservationRepository) UpdateObservation(ctx context.Context, o interna
 	result, err := tx.Exec(ctx, `UPDATE observations SET resource_type=$2,data=$3
  WHERE id=$1 AND deleted_at IS NULL AND COALESCE(data->'meta'->>'versionId','')=$4`, id, o.ResourceType, data, previousVersion)
 	if err != nil { // Translate the database error here instead of calling a shared mapper.
-		if errors.Is(err, pgx.ErrNoRows) {
-			return internal.ErrNotFound
-		}
 		var postgresError5 *pgconn.PgError
 		if errors.As(err, &postgresError5) && postgresError5.Code == "23505" {
 			return fmt.Errorf("%w: resource id already exists", internal.ErrConflict)
@@ -234,9 +213,6 @@ func (r *ObservationRepository) UpdateObservation(ctx context.Context, o interna
 		return internal.ErrPrecondition
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO observation_history (resource_id,version_id,data,method) VALUES ($1,$2,$3,'PUT')`, id, o.Meta.VersionID, data); err != nil { // Translate the database error here instead of calling a shared mapper.
-		if errors.Is(err, pgx.ErrNoRows) {
-			return internal.ErrNotFound
-		}
 		var postgresError6 *pgconn.PgError
 		if errors.As(err, &postgresError6) && postgresError6.Code == "23505" {
 			return fmt.Errorf("%w: resource id already exists", internal.ErrConflict)
@@ -278,16 +254,8 @@ func (r *ObservationRepository) DeleteObservation(ctx context.Context, id, expec
 		}
 		return err
 	}
-	if err := deleteObservationTx(ctx, tx, id, expectedVersion, time.Now().UTC()); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-// The resource-specific transaction step is intentionally repeated per type.
-// Patient deletion calls it in the Patient's transaction, preserving atomic cascade.
-func deleteObservationTx(ctx context.Context, tx pgx.Tx, id, expectedVersion string, at time.Time) error {
-
+	// This transaction reads the current version, checks the caller's version,
+	// saves history, marks the row deleted, and records the DELETE version.
 	var data []byte
 	var deleted bool
 	if err := tx.QueryRow(ctx, `SELECT data, deleted_at IS NOT NULL FROM observations WHERE id = $1 FOR UPDATE`, id).Scan(&data, &deleted); err != nil { // Translate the database error here instead of calling a shared mapper.
@@ -301,7 +269,7 @@ func deleteObservationTx(ctx context.Context, tx pgx.Tx, id, expectedVersion str
 		return err
 	}
 	if deleted {
-		return nil
+		return tx.Commit(ctx)
 	}
 	var header struct{ Meta internal.Meta }
 	if err := json.Unmarshal(data, &header); err != nil {
@@ -318,26 +286,25 @@ func deleteObservationTx(ctx context.Context, tx pgx.Tx, id, expectedVersion str
 			return fmt.Errorf("invalid stored resource version")
 		}
 	}
-	// Explicit snapshot, timestamp update, and deletion marker.
+	deletedAt := time.Now().UTC()
+	// Save the current resource in history before marking the row deleted.
 	if _, err := tx.Exec(ctx, `INSERT INTO observation_history (resource_id, version_id, data, method)
  SELECT id, COALESCE(NULLIF(data->'meta'->>'versionId', ''), 'legacy'), data, 'PUT'
  FROM observations WHERE id = $1 ON CONFLICT (resource_id, version_id) DO NOTHING`, id); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE observations SET deleted_at=$2 WHERE id=$1`, id, at); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE observations SET deleted_at=$2 WHERE id=$1`, id, deletedAt); err != nil {
 		return err
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO observation_history (resource_id,version_id,method,recorded_at) VALUES ($1,$2,'DELETE',$3)`, id, strconv.Itoa(n+1), at)
-	// Translate the database error here instead of calling a shared mapper.
-	if errors.Is(err, pgx.ErrNoRows) {
-		return internal.ErrNotFound
-	}
+	_, err := tx.Exec(ctx, `INSERT INTO observation_history (resource_id,version_id,method,recorded_at) VALUES ($1,$2,'DELETE',$3)`, id, strconv.Itoa(n+1), deletedAt)
 	var postgresError10 *pgconn.PgError
 	if errors.As(err, &postgresError10) && postgresError10.Code == "23505" {
 		return fmt.Errorf("%w: resource id already exists", internal.ErrConflict)
 	}
-	return err
-
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *ObservationRepository) GetObservationHistory(ctx context.Context, id string) ([]ResourceVersion, error) {

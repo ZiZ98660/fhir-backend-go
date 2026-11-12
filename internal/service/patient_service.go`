@@ -20,9 +20,9 @@ import (
 	jsonpatch "github.com/evanphx/json-patch/v5"
 )
 
-type PatientService struct{ repo repository.PatientStore }
+type PatientService struct{ repo *repository.PatientRepository }
 
-func NewPatientService(repo repository.PatientStore) *PatientService {
+func NewPatientService(repo *repository.PatientRepository) *PatientService {
 	return &PatientService{repo: repo}
 }
 

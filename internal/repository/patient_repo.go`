@@ -20,17 +20,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type PatientStore interface {
-	InitTable(ctx context.Context) error
-	SavePatient(ctx context.Context, p internal.Patient, data []byte) error
-	UpdatePatient(ctx context.Context, p internal.Patient, data []byte, previousVersion string) error
-	SearchPatients(ctx context.Context, identifier string, searchTerm string) ([][]byte, error)
-	GetPatientByID(ctx context.Context, id string) ([]byte, error)
-	DeletePatient(ctx context.Context, id, expectedVersion string) error
-	GetPatientHistory(ctx context.Context, id string) ([]ResourceVersion, error)
-	GetPatientVersion(ctx context.Context, id, version string) (ResourceVersion, error)
-}
-
 type ResourceVersion struct {
 	VersionID  string
 	Data       []byte
@@ -42,7 +31,7 @@ type PatientRepository struct {
 	pool *pgxpool.Pool
 }
 
-func NewPatientRepository(pool *pgxpool.Pool) PatientStore {
+func NewPatientRepository(pool *pgxpool.Pool) *PatientRepository {
 	return &PatientRepository{pool: pool}
 }
 
@@ -110,10 +99,7 @@ func (r *PatientRepository) SavePatient(ctx context.Context, p internal.Patient,
 	defer tx.Rollback(ctx)
 	query := `INSERT INTO patients (id, resource_type, data) VALUES ($1, $2, $3)`
 	if _, err := tx.Exec(ctx, query, p.ID, p.ResourceType, data); err != nil {
-		// Translate the database error here instead of calling a shared mapper.
-		if errors.Is(err, pgx.ErrNoRows) {
-			return internal.ErrNotFound
-		}
+		// Exec reports constraint/database errors; ErrNoRows applies to QueryRow.Scan.
 		var postgresError0 *pgconn.PgError
 		if errors.As(err, &postgresError0) && postgresError0.Code == "23505" {
 			return fmt.Errorf("%w: resource id already exists", internal.ErrConflict)
@@ -126,10 +112,6 @@ func (r *PatientRepository) SavePatient(ctx context.Context, p internal.Patient,
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO patient_history (patient_id, version_id, data, method)
 		VALUES ($1, $2, $3, 'POST')`, p.ID, version, data); err != nil {
-		// Translate the database error here instead of calling a shared mapper.
-		if errors.Is(err, pgx.ErrNoRows) {
-			return internal.ErrNotFound
-		}
 		var postgresError1 *pgconn.PgError
 		if errors.As(err, &postgresError1) && postgresError1.Code == "23505" {
 			return fmt.Errorf("%w: resource id already exists", internal.ErrConflict)
@@ -183,9 +165,6 @@ func (r *PatientRepository) UpdatePatient(ctx context.Context, p internal.Patien
 	result, err := tx.Exec(ctx, `UPDATE patients SET resource_type=$2,data=$3
  WHERE id=$1 AND deleted_at IS NULL AND COALESCE(data->'meta'->>'versionId','')=$4`, id, p.ResourceType, data, previousVersion)
 	if err != nil { // Translate the database error here instead of calling a shared mapper.
-		if errors.Is(err, pgx.ErrNoRows) {
-			return internal.ErrNotFound
-		}
 		var postgresError3 *pgconn.PgError
 		if errors.As(err, &postgresError3) && postgresError3.Code == "23505" {
 			return fmt.Errorf("%w: resource id already exists", internal.ErrConflict)
@@ -196,9 +175,6 @@ func (r *PatientRepository) UpdatePatient(ctx context.Context, p internal.Patien
 		return internal.ErrPrecondition
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO patient_history (patient_id,version_id,data,method) VALUES ($1,$2,$3,'PUT')`, id, p.Meta.VersionID, data); err != nil { // Translate the database error here instead of calling a shared mapper.
-		if errors.Is(err, pgx.ErrNoRows) {
-			return internal.ErrNotFound
-		}
 		var postgresError4 *pgconn.PgError
 		if errors.As(err, &postgresError4) && postgresError4.Code == "23505" {
 			return fmt.Errorf("%w: resource id already exists", internal.ErrConflict)
@@ -313,8 +289,38 @@ func (r *PatientRepository) DeletePatient(ctx context.Context, id, expectedVersi
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	// Delete each Observation inside this same transaction. Each child gets its
+	// own snapshot and DELETE history entry before its deleted_at timestamp is set.
 	for _, childID := range observationIDs {
-		if err := deleteObservationTx(ctx, tx, childID, "", deletedAt); err != nil {
+		var childData []byte
+		var childDeleted bool
+		if err := tx.QueryRow(ctx, `SELECT data, deleted_at IS NOT NULL FROM observations WHERE id=$1 FOR UPDATE`, childID).Scan(&childData, &childDeleted); err != nil {
+			return err
+		}
+		if childDeleted {
+			continue
+		}
+		var childHeader struct{ Meta internal.Meta }
+		if err := json.Unmarshal(childData, &childHeader); err != nil {
+			return err
+		}
+		childVersion := 0
+		if childHeader.Meta.VersionID != "" {
+			childVersion, err = strconv.Atoi(childHeader.Meta.VersionID)
+			if err != nil || childVersion < 1 || childVersion == int(^uint(0)>>1) {
+				return fmt.Errorf("invalid stored observation version")
+			}
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO observation_history (resource_id,version_id,data,method)
+			SELECT id, COALESCE(NULLIF(data->'meta'->>'versionId',''),'legacy'), data, 'PUT'
+			FROM observations WHERE id=$1 ON CONFLICT (resource_id,version_id) DO NOTHING`, childID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE observations SET deleted_at=$2 WHERE id=$1`, childID, deletedAt); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO observation_history (resource_id,version_id,method,recorded_at)
+			VALUES ($1,$2,'DELETE',$3)`, childID, strconv.Itoa(childVersion+1), deletedAt); err != nil {
 			return err
 		}
 	}
@@ -335,8 +341,38 @@ func (r *PatientRepository) DeletePatient(ctx context.Context, id, expectedVersi
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	// Repeat the same explicit sequence for Conditions so the whole Patient
+	// cascade either commits together or rolls back together.
 	for _, childID := range conditionIDs {
-		if err := deleteConditionTx(ctx, tx, childID, "", deletedAt); err != nil {
+		var childData []byte
+		var childDeleted bool
+		if err := tx.QueryRow(ctx, `SELECT data, deleted_at IS NOT NULL FROM conditions WHERE id=$1 FOR UPDATE`, childID).Scan(&childData, &childDeleted); err != nil {
+			return err
+		}
+		if childDeleted {
+			continue
+		}
+		var childHeader struct{ Meta internal.Meta }
+		if err := json.Unmarshal(childData, &childHeader); err != nil {
+			return err
+		}
+		childVersion := 0
+		if childHeader.Meta.VersionID != "" {
+			childVersion, err = strconv.Atoi(childHeader.Meta.VersionID)
+			if err != nil || childVersion < 1 || childVersion == int(^uint(0)>>1) {
+				return fmt.Errorf("invalid stored condition version")
+			}
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO condition_history (resource_id,version_id,data,method)
+			SELECT id, COALESCE(NULLIF(data->'meta'->>'versionId',''),'legacy'), data, 'PUT'
+			FROM conditions WHERE id=$1 ON CONFLICT (resource_id,version_id) DO NOTHING`, childID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE conditions SET deleted_at=$2 WHERE id=$1`, childID, deletedAt); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO condition_history (resource_id,version_id,method,recorded_at)
+			VALUES ($1,$2,'DELETE',$3)`, childID, strconv.Itoa(childVersion+1), deletedAt); err != nil {
 			return err
 		}
 	}
@@ -358,9 +394,6 @@ func (r *PatientRepository) DeletePatient(ctx context.Context, id, expectedVersi
 		return err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO patient_history(patient_id,version_id,method,recorded_at) VALUES($1,$2,'DELETE',$3)`, id, strconv.Itoa(n+1), deletedAt); err != nil { // Translate the database error here instead of calling a shared mapper.
-		if errors.Is(err, pgx.ErrNoRows) {
-			return internal.ErrNotFound
-		}
 		var postgresError7 *pgconn.PgError
 		if errors.As(err, &postgresError7) && postgresError7.Code == "23505" {
 			return fmt.Errorf("%w: resource id already exists", internal.ErrConflict)

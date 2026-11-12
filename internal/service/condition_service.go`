@@ -19,9 +19,11 @@ import (
 	"time"
 )
 
-type ConditionService struct{ repo repository.ConditionStore }
+type ConditionService struct {
+	repo *repository.ConditionRepository
+}
 
-func NewConditionService(repo repository.ConditionStore) *ConditionService {
+func NewConditionService(repo *repository.ConditionRepository) *ConditionService {
 	return &ConditionService{repo: repo}
 }
 

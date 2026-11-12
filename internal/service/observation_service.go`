@@ -19,9 +19,11 @@ import (
 	"time"
 )
 
-type ObservationService struct{ repo repository.ObservationStore }
+type ObservationService struct {
+	repo *repository.ObservationRepository
+}
 
-func NewObservationService(repo repository.ObservationStore) *ObservationService {
+func NewObservationService(repo *repository.ObservationRepository) *ObservationService {
 	return &ObservationService{repo: repo}
 }
 
