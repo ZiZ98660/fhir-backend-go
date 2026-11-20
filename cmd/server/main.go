@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"go-fhir-phase1/internal/handler"
+	"go-fhir-phase1/internal/integration"
 	"go-fhir-phase1/internal/middleware"
+	"go-fhir-phase1/internal/migrations"
 	"go-fhir-phase1/internal/repository"
 	"go-fhir-phase1/internal/service"
 
@@ -64,12 +66,22 @@ func main() {
 	if err := condRepo.InitTable(startupCtx); err != nil {
 		log.Fatalf("Failed to initialize condition table: %v", err)
 	}
+	if err := migrations.Apply(startupCtx, pool); err != nil {
+		log.Fatal("Failed to apply integration database migrations")
+	}
+	// One configured synthetic source for this first slice. Scope never comes
+	// from incoming JSON; this does not provide multi-tenant authorization.
+	integrationHandler := handler.NewIntegrationHandler(
+		integration.NewService(integration.NewPostgresStore(pool)),
+		integration.Scope{TenantID: "synthetic-demo", SourceID: "synthetic-lis"},
+	)
 
 	mux := http.NewServeMux()
 	for path, fn := range map[string]http.HandlerFunc{
-		"/api/v1/Patient":     patientHandler.HandlePatient,
-		"/api/v1/Observation": obsHandler.HandleObservation,
-		"/api/v1/Condition":   condHandler.HandleCondition,
+		"/api/v1/Patient":             patientHandler.HandlePatient,
+		"/api/v1/Observation":         obsHandler.HandleObservation,
+		"/api/v1/Condition":           condHandler.HandleCondition,
+		"/api/v1/integration/results": integrationHandler.HandleResults,
 	} {
 		protected := middleware.AuthMiddleware(apiToken, fn)
 		mux.HandleFunc(path, protected)

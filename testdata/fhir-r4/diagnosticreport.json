@@ -1,0 +1,13 @@
+{
+  "resourceType": "DiagnosticReport",
+  "id": "report-demo",
+  "identifier": [{"system": "https://example.org/synthetic-lis/reports", "value": "SYN-REPORT-1"}],
+  "basedOn": [{"reference": "ServiceRequest/order-demo"}],
+  "status": "final",
+  "code": {"coding": [{"system": "https://example.org/fhir/CodeSystem/lab-tests", "code": "SYN-GLU"}]},
+  "subject": {"reference": "Patient/patient-demo"},
+  "effectiveDateTime": "2026-11-08T08:00:00Z",
+  "issued": "2026-11-08T08:05:00Z",
+  "specimen": [{"reference": "Specimen/specimen-demo"}],
+  "result": [{"reference": "Observation/observation-demo"}]
+}
