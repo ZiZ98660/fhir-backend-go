@@ -1,14 +1,21 @@
-# Step 1: Minimal Viable FHIR EMR Backend
+# Step 2: Layered 3-Tier Architecture ("Elite Architecture")
 
-This branch represents the foundational, minimal implementation of an EMR backend.
+This branch refactors the monolithic Step 1 backend into a clean 3-tier architecture.
 
 ## Architectural Concepts
-- **Direct Transport & Persistence:** Standard library `net/http` handles HTTP endpoints (`/api/v1/Patient` and `/health`).
-- **PostgreSQL JSONB Storage:** Records are stored directly as raw JSONB in a single `patients` table.
-- **Minimal FHIR Model:** `internal/patient.go` defines standard FHIR R4 `Patient`, `HumanName`, `Identifier`, and `Address`.
-- **Zero Architectural Abstractions:** No repository, service, or middleware layers yet—designed to understand the raw HTTP request/response and database cycle.
+- **Repository Layer (`internal/repository/`):** Manages all database queries, parameterized SQL, and connection pools. Defines the `PatientStore` interface for testability.
+- **Service Layer (`internal/service/`):** Owns business rules, input validation, ID assignment, and FHIR `Bundle` search formatting. Completely decoupled from HTTP.
+- **Handler Layer (`internal/handler/`):** Maps HTTP requests to service calls, parses query strings, and manages FHIR content types (`application/fhir+json`).
+- **Composition Root (`cmd/server/main.go`):** Uses constructor-based dependency injection:
+  `Database Pool` $\rightarrow$ `Repository` $\rightarrow$ `Service` $\rightarrow$ `Handler`.
 
-## How to Run
+## How to Compare with Step 1
 ```sh
+git diff step-01-minimal-emr
+```
+
+## How to Test and Run
+```sh
+go test ./...
 go run ./cmd/server/main.go
 ```
