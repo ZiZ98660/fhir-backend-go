@@ -3,11 +3,14 @@ package integration
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go-fhir-phase1/internal"
 )
@@ -113,11 +116,109 @@ func (s *PostgresStore) Receive(ctx context.Context, scope Scope, message Submis
 
 func (s *PostgresStore) Get(ctx context.Context, scope Scope, id string) (Receipt, error) {
 	var receipt Receipt
-	err := s.pool.QueryRow(ctx, `SELECT id,state,reason,received_at FROM integration_messages
+	var observationID, reportID pgtype.Text
+	var transformedAt pgtype.Timestamptz
+	err := s.pool.QueryRow(ctx, `SELECT id,state,reason,received_at,observation_id,diagnostic_report_id,transformed_at FROM integration_messages
 		WHERE id=$1 AND tenant_id=$2 AND source_id=$3`, id, scope.TenantID, scope.SourceID).
-		Scan(&receipt.ID, &receipt.State, &receipt.Reason, &receipt.ReceivedAt)
+		Scan(&receipt.ID, &receipt.State, &receipt.Reason, &receipt.ReceivedAt, &observationID, &reportID, &transformedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Receipt{}, internal.ErrNotFound
 	}
+	if observationID.Valid {
+		receipt.ObservationID = observationID.String
+	}
+	if reportID.Valid {
+		receipt.DiagnosticReportID = reportID.String
+	}
+	if transformedAt.Valid {
+		receipt.TransformedAt = &transformedAt.Time
+	}
 	return receipt, err
+}
+
+// Transform locks the receipt, rechecks that its explicit mappings still point
+// to a live patient, then stores the generated FHIR Bundle and state together.
+func (s *PostgresStore) Transform(ctx context.Context, scope Scope, id string) (json.RawMessage, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	var receiptID, state, reason string
+	var patientID, orderKey pgtype.Text
+	var normalizedPayload, savedBundle []byte
+	var observationID, reportID pgtype.Text
+	var transformedAt pgtype.Timestamptz
+	err = tx.QueryRow(ctx, `SELECT id,state,reason,patient_id,order_key,normalized_payload,
+		observation_id,diagnostic_report_id,transformed_at,transformation_bundle
+		FROM integration_messages WHERE id=$1 AND tenant_id=$2 AND source_id=$3 FOR UPDATE`,
+		id, scope.TenantID, scope.SourceID).Scan(
+		&receiptID, &state, &reason, &patientID, &orderKey, &normalizedPayload,
+		&observationID, &reportID, &transformedAt, &savedBundle,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, internal.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if state == "transformed" {
+		return json.RawMessage(savedBundle), nil
+	}
+	if state != "ready_for_transformation" {
+		return nil, internal.ErrConflict
+	}
+	if !patientID.Valid || !orderKey.Valid {
+		return nil, internal.ErrConflict
+	}
+
+	result, err := DecodeResult(normalizedPayload)
+	if err != nil {
+		return nil, err
+	}
+	// The mapping may have changed or the Patient may have been soft-deleted
+	// since intake. Never build patient-linked FHIR resources from stale context.
+	var currentPatient string
+	err = tx.QueryRow(ctx, `SELECT p.id FROM patients p
+		JOIN integration_patient_mappings pm ON pm.patient_id=p.id
+		JOIN integration_order_mappings om ON om.patient_id=p.id
+		WHERE p.id=$1 AND p.deleted_at IS NULL
+		AND pm.tenant_id=$2 AND pm.source_id=$3
+		AND pm.identifier_system=$4 AND pm.identifier_value=$5
+		AND om.tenant_id=$2 AND om.source_id=$3
+		AND om.identifier_system=$6 AND om.identifier_value=$7 AND om.order_key=$8
+		FOR SHARE OF p, pm, om`, patientID.String, scope.TenantID, scope.SourceID,
+		result.PatientIdentifier.System, result.PatientIdentifier.Value,
+		result.OrderIdentifier.System, result.OrderIdentifier.Value, orderKey.String).Scan(&currentPatient)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, internal.ErrConflict
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	issuedAt := time.Now().UTC()
+	bundle, observationResourceID, reportResourceID, err := BuildTransactionBundle(scope, currentPatient, result, issuedAt)
+	if err != nil {
+		return nil, err
+	}
+	command, err := tx.Exec(ctx, `UPDATE integration_messages
+		SET state='transformed', transformation_bundle=$2, observation_id=$3,
+			diagnostic_report_id=$4, transformed_at=$5
+		WHERE id=$1 AND state='ready_for_transformation'`,
+		receiptID, []byte(bundle), observationResourceID, reportResourceID, issuedAt)
+	if err != nil {
+		return nil, err
+	}
+	if command.RowsAffected() != 1 {
+		return nil, internal.ErrConflict
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO integration_events (message_id,event_type) VALUES ($1,'transformed')`, receiptID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return bundle, nil
 }

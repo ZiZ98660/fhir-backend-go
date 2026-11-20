@@ -47,10 +47,13 @@ type NumericValue struct {
 var numericPattern = regexp.MustCompile(`^-?(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$`)
 
 type Receipt struct {
-	ID         string    `json:"id"`
-	State      string    `json:"state"`
-	Reason     string    `json:"reason,omitempty"`
-	ReceivedAt time.Time `json:"receivedAt"`
+	ID                 string     `json:"id"`
+	State              string     `json:"state"`
+	Reason             string     `json:"reason,omitempty"`
+	ReceivedAt         time.Time  `json:"receivedAt"`
+	ObservationID      string     `json:"observationId,omitempty"`
+	DiagnosticReportID string     `json:"diagnosticReportId,omitempty"`
+	TransformedAt      *time.Time `json:"transformedAt,omitempty"`
 }
 
 type Submission struct {
@@ -65,6 +68,7 @@ type Submission struct {
 type Store interface {
 	Receive(context.Context, Scope, Submission) (Receipt, bool, error)
 	Get(context.Context, Scope, string) (Receipt, error)
+	Transform(context.Context, Scope, string) (json.RawMessage, error)
 }
 
 type Service struct{ store Store }
@@ -97,6 +101,13 @@ func (s *Service) Get(ctx context.Context, scope Scope, id string) (Receipt, err
 		return Receipt{}, internal.Invalid("invalid integration receipt or scope")
 	}
 	return s.store.Get(ctx, scope, id)
+}
+
+func (s *Service) Transform(ctx context.Context, scope Scope, id string) (json.RawMessage, error) {
+	if !internal.ValidID(id) || !internal.ValidID(scope.TenantID) || !internal.ValidID(scope.SourceID) {
+		return nil, internal.Invalid("invalid integration receipt or scope")
+	}
+	return s.store.Transform(ctx, scope, id)
 }
 
 func DecodeResult(raw []byte) (Result, error) {

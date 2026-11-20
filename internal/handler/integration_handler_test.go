@@ -34,6 +34,9 @@ func (s *intakeStore) Get(_ context.Context, scope integration.Scope, id string)
 	}
 	return integration.Receipt{ID: id, State: "needs_reconciliation"}, s.failure
 }
+func (s *intakeStore) Transform(context.Context, integration.Scope, string) (json.RawMessage, error) {
+	return nil, s.failure
+}
 
 func TestIntegrationIntakeHTTP(t *testing.T) {
 	raw, err := os.ReadFile("../../testdata/integration/synthetic-result.json")

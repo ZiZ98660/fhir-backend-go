@@ -3,6 +3,7 @@ package integration
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -32,6 +33,9 @@ func (s *captureStore) Receive(_ context.Context, scope Scope, message Submissio
 }
 func (s *captureStore) Get(context.Context, Scope, string) (Receipt, error) {
 	return Receipt{}, internal.ErrNotFound
+}
+func (s *captureStore) Transform(context.Context, Scope, string) (json.RawMessage, error) {
+	return nil, internal.ErrConflict
 }
 
 func TestIntakePreservesIdentifiersDecimalsAndRawInput(t *testing.T) {

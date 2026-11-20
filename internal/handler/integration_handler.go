@@ -52,6 +52,22 @@ func (h *IntegrationHandler) HandleResults(w http.ResponseWriter, r *http.Reques
 		}{receipt, duplicate})
 		return
 	}
+	if strings.HasSuffix(path, "/$transform") {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, "POST")
+			return
+		}
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/"), "/$transform")
+		bundle, err := h.service.Transform(r.Context(), h.scope, id)
+		if err != nil {
+			integrationError(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/fhir+json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bundle)
+		return
+	}
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, "GET")
 		return

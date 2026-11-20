@@ -1,5 +1,7 @@
 package internal
 
+import "encoding/json"
+
 // Gender is a custom type for FHIR gender value sets.
 // type Gender int
 
@@ -151,10 +153,11 @@ type Coding struct {
 }
 
 type Quantity struct {
-	Value  *float64 `json:"value,omitempty"`
-	Unit   string   `json:"unit,omitempty"`
-	System string   `json:"system,omitempty"`
-	Code   string   `json:"code,omitempty"`
+	// json.Number keeps clinical decimal precision, including meaningful zeros.
+	Value  *json.Number `json:"value,omitempty"`
+	Unit   string       `json:"unit,omitempty"`
+	System string       `json:"system,omitempty"`
+	Code   string       `json:"code,omitempty"`
 }
 
 type Duration struct {

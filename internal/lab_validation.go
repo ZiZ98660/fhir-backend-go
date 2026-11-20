@@ -130,7 +130,14 @@ func (d DiagnosticReport) Validate() error {
 
 // This application supports local references of a specified kind. Syntax checks
 // do not prove the target exists; the later workflow must check that separately.
+// Transaction Bundle references use urn:uuid identifiers to connect entries
+// before the receiving FHIR server assigns its own persistent URLs.
+var labBundleUUID = regexp.MustCompile(`^urn:uuid:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
+
 func labReference(ref Reference, kind string) error {
+	if labBundleUUID.MatchString(ref.Reference) {
+		return nil
+	}
 	id, ok := strings.CutPrefix(ref.Reference, kind+"/")
 	if !ok || !ValidID(id) {
 		return Invalid("expected a local %s reference", kind)

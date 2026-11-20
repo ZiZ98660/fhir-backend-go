@@ -1,4 +1,4 @@
-# First integration slice: receive first, transform later
+# First integration slice: receive and transform synthetic results
 
 ## What runs now
 
@@ -9,6 +9,7 @@ integration workflow adds two routes protected by the same bearer token:
 | --- | --- |
 | `POST /api/v1/integration/results` | Validate a synthetic result and commit its receipt. |
 | `GET /api/v1/integration/results/{receipt-id}` | Read receipt metadata, not clinical payloads. |
+| `POST /api/v1/integration/results/{receipt-id}/$transform` | Create and return a persisted FHIR R4 transaction Bundle. |
 
 The intake body is an **application contract**, not FHIR JSON. Send
 `Content-Type: application/json`. The checked-in example is
@@ -107,8 +108,7 @@ VALUES ('synthetic-demo', 'synthetic-lis',
 
 order_key is a configured integration context key, not a newly created FHIR
 ServiceRequest and not proof that an external order exists. Only configure it
-after establishing the synthetic order context. Actual order/resource lookup
-belongs to the next transformation slice.
+after establishing the synthetic order context.
 
 Provision mappings before sending the example to exercise ready_for_transformation.
 An existing receipt is not silently reprocessed when mappings change. For a new
@@ -116,8 +116,31 @@ independent demonstration, change both messageId and resultId. A reconciliation
 and replay operation is not implemented yet.
 
 ready_for_transformation means mappings existed when intake committed. It does
-not start a worker or promise delivery. Future processing must revalidate patient
-state, order context and linked records before producing resources.
+not start a worker or promise delivery. The explicit transform endpoint
+revalidates the live Patient and both mappings before creating resources.
+
+## Transforming to FHIR
+
+After a receipt reaches `ready_for_transformation`, call:
+
+```sh
+curl -i -X POST \
+  'http://localhost:8080/api/v1/integration/results/{receipt-id}/$transform' \
+  -H "Authorization: Bearer $API_TOKEN"
+```
+
+The response is a FHIR R4 `Bundle` of type `transaction`: it contains a final
+`Observation` with the measured quantity and a final `DiagnosticReport` whose
+`result` points to that Observation. The Bundle uses `PUT` requests and stable
+resource IDs, so retrying returns the exact saved Bundle rather than generating
+new resource IDs. The server currently stores this Bundle with the intake receipt;
+it does not send it to another FHIR server or insert the resources into the
+local clinical tables. No `ServiceRequest` or `Specimen` is invented from the
+current intake fields.
+
+The Bundle follows the R4 transaction entry and fullUrl reference model, while
+the report and observation use their R4 resource fields. This is a focused
+synthetic profile, not full FHIR validation or external delivery.
 
 ## Transactions, raw data and migrations
 
@@ -160,16 +183,14 @@ exist. Later Specimen.request can reference that order.
 Only selected fields and dateTime choice alternatives are modeled. Invalid
 optional values are checked, but validation does not establish target existence,
 patient ownership, full datatype constraints, terminology correctness, FHIRPath
-invariants, or profile conformance. There are no new FHIR endpoints for these
-resources yet. Existing Observation's three new optional linkage fields do not
+invariants, or profile conformance. There are no new standalone CRUD endpoints
+for these resources yet. Existing Observation's three new optional linkage fields do not
 perform target existence checks either.
 
 testdata/fhir-r4 contains authored synthetic JSON examples, not copies of patient
-records and not an automatically emitted report. Their shared patient reference
-is illustrative. Our tests check modeled shapes and rules; an independent R4
-profile validator has not been run. Existing Quantity uses float64; the new intake
-uses json.Number. Preserving exact decimals during future FHIR transformation
-needs an explicit datatype decision before conversion is implemented.
+records. The generated Bundle uses the same selected models. Intake and
+Observation quantity use json.Number to preserve decimal spelling. An independent
+R4 profile validator has not been run.
 
 Timestamp validation checks lexical shape and calendar validity; the supported
 instant subset excludes leap seconds and fractions beyond nine digits even though
@@ -193,7 +214,8 @@ deduplication, result collision handling, migration repeatability/checksums and
 rollback when an audit write fails. Without that variable they skip; passing
 unit tests is not proof that the SQL was exercised.
 
-Next: transform a ready receipt into a validated, patient-consistent set of lab
-resources, then add an outbox/worker and one simulated EMR. No delivery queue,
-retry loop, EMR connector, HL7 parser, correction workflow, real multi-tenancy,
-full conformance validator or imaging support is implemented in this slice.
+Next: add an outbound FHIR client and durable outbox/retry behavior, then send
+this transaction Bundle to a configured target FHIR server and record its
+transaction response. No delivery queue, retry loop, EMR connector, HL7 parser,
+correction workflow, real multi-tenancy, full conformance validator or imaging
+support is implemented in this slice.
