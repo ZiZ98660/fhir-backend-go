@@ -1,0 +1,31 @@
+package internal
+
+import (
+	"errors"
+	"fmt"
+)
+
+// BEFORE: errors.New("some explanation") gave callers a standalone error.
+//
+// NOW: common category values let callers identify a failure without comparing
+// message strings. Services report categories; handler.sendError selects statuses.
+// These ordinary shared values are called sentinel errors.
+// OPTIONAL ABSTRACTION: a small handler can write a specific response directly.
+// This design helps across layers but is not required by Go or FHIR.
+var (
+	ErrInvalid          = errors.New("invalid resource")
+	ErrNotFound         = errors.New("resource not found")
+	ErrGone             = errors.New("resource deleted")
+	ErrConflict         = errors.New("resource conflict")
+	ErrPrecondition     = errors.New("resource version has changed")
+	ErrUnsupportedMedia = errors.New("unsupported content type")
+)
+
+// BEFORE: errors.New("some explanation").
+// NOW: Invalid("bad id %q", id) adds detail while %w preserves ErrInvalid.
+// errors.Is(result, ErrInvalid) remains true. args ...any accepts formatting
+// values; args... expands their slice when forwarding it to fmt.Sprintf.
+// %s formats explanation text; %w preserves the error category.
+func Invalid(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrInvalid, fmt.Sprintf(format, args...))
+}

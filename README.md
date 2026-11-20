@@ -1,17 +1,18 @@
-# Step 2: Layered 3-Tier Architecture ("Elite Architecture")
+# Step 3: FHIR Production Hardening, Auth, & Multi-Resource History
 
-This branch refactors the monolithic Step 1 backend into a clean 3-tier architecture.
+This branch introduces production healthcare standards: security, standardized error handling, optimistic concurrency, immutable audit history, and clinical resource expansions.
 
 ## Architectural Concepts
-- **Repository Layer (`internal/repository/`):** Manages all database queries, parameterized SQL, and connection pools. Defines the `PatientStore` interface for testability.
-- **Service Layer (`internal/service/`):** Owns business rules, input validation, ID assignment, and FHIR `Bundle` search formatting. Completely decoupled from HTTP.
-- **Handler Layer (`internal/handler/`):** Maps HTTP requests to service calls, parses query strings, and manages FHIR content types (`application/fhir+json`).
-- **Composition Root (`cmd/server/main.go`):** Uses constructor-based dependency injection:
-  `Database Pool` $\rightarrow$ `Repository` $\rightarrow$ `Service` $\rightarrow$ `Handler`.
+- **Authentication & Middleware (`internal/middleware/`):** Bearer token validation and request context timeouts.
+- **Standardized FHIR Error Outcomes (`internal/outcome.go` & `internal/errors.go`):** Translates Go sentinel errors (`ErrNotFound`, `ErrConflict`, etc.) into FHIR `OperationOutcome` responses.
+- **HTTP Transport Hardening (`internal/handler/http.go`):** 1 MiB body protection (`MaxBytesReader`), weak ETag parsing (`If-Match: W/"..."`), and generic resource decoder `decodeResource[T]`.
+- **Audit History & Soft Deletion:** `patient_history`, `observation_history`, and `condition_history` tables tracking every version (`versionId`, `lastUpdated`). Records are soft-deleted via `deleted_at`.
+- **Multi-Resource Clinical Expansion:** Introduces `Observation` and `Condition` using shared repository writes (`internal/repository/resource_writes.go`).
+- **Comprehensive Testing:** End-to-end HTTP tests, concurrency tests, and database lifecycle verification.
 
-## How to Compare with Step 1
+## How to Compare with Step 2
 ```sh
-git diff step-01-minimal-emr
+git diff step-02-layered-architecture
 ```
 
 ## How to Test and Run

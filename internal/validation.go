@@ -1,0 +1,272 @@
+package internal
+
+import (
+	"regexp"
+	"strings"
+	"time"
+)
+
+// BEFORE: most checks were written directly in each creation service.
+// NOW: this file groups reusable rules; callers invoke Validate or reference helpers.
+// Moving the checks was optional. Changing which input is accepted is behavior.
+// A regular expression is just a compact string-pattern check: this one allows
+// 1-64 letters, digits, hyphens, or periods. It is compiled once for reuse.
+var resourceID = regexp.MustCompile(`^[A-Za-z0-9\-.]{1,64}$`)
+
+func ValidID(id string) bool { return resourceID.MatchString(id) }
+
+// This server supports local Patient references; reject other forms explicitly.
+// BEFORE: reference[len("Patient/"):] assumed the prefix and enough characters.
+// NOW: CutPrefix returns both the remainder and whether the prefix was present.
+// Reject a wrong prefix or bad remainder before returning the ID.
+// The helper's name is organization; preventing a panic is the actual fix.
+func PatientID(reference string) (string, error) {
+	id, ok := strings.CutPrefix(reference, "Patient/")
+	if !ok || !ValidID(id) {
+		return "", Invalid("subject.reference must be Patient/{id}")
+	}
+	return id, nil
+}
+
+// BEFORE: Observation passed the query through; Condition always prepended Patient/.
+// NOW: accept p1 or Patient/p1 and return p1. Each service then supplies the shape
+// its repository needs. Normalizing once avoids double prefixes and inconsistent
+// search behavior. A concrete check inside each service would also work.
+func PatientSearchID(value string) (string, error) {
+	if strings.HasPrefix(value, "Patient/") {
+		return PatientID(value)
+	}
+	if !ValidID(value) {
+		return "", Invalid("patient must be an id or Patient/{id}")
+	}
+	return value, nil
+}
+
+// BEFORE (inside Observation/Condition creation):
+// if o.Code.Text == "" { return ..., errors.New("... must have a code text") }
+// NOW: meaningful text OR at least one coding code is enough for this app's check.
+// (c CodeableConcept) is a value receiver: the method inspects c without modifying
+// the caller's struct. This is a small reusable predicate, not a new data layer.
+func (c CodeableConcept) HasValue() bool {
+	if strings.TrimSpace(c.Text) != "" {
+		return true
+	}
+	for _, coding := range c.Coding {
+		if strings.TrimSpace(coding.Code) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func resourceType(actual, expected string) error {
+	if actual != expected {
+		return Invalid("resourceType must be %s", expected)
+	}
+	return nil
+}
+
+// BEFORE (service excerpt; inactive):
+//
+//	if len(p.Name) == 0 || p.Name[0].Family == "" {
+//	    return internal.Patient{}, errors.New("at least one name with a family name is required")
+//	}
+//
+// NOW: check resource type and supported values, including real calendar dates.
+// Name is not universally mandatory, so we removed that old application restriction.
+// WHY A METHOD: create, replace, patch, and stored-data reads can share the checks.
+// It could instead be validatePatient(p); methods are an organization choice.
+// Return nil on success, otherwise return immediately with an error (a guard clause).
+func (p Patient) Validate() error {
+	if err := resourceType(p.ResourceType, "Patient"); err != nil {
+		return err
+	}
+	if p.Gender != "" && !oneOf(p.Gender, "male", "female", "other", "unknown") {
+		return Invalid("invalid Patient.gender")
+	}
+	if p.BirthDate != "" {
+		valid := false
+		for _, layout := range []string{"2006", "2006-01", "2006-01-02"} {
+			if parsed, err := time.Parse(layout, p.BirthDate); err == nil && parsed.Year() > 0 {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return Invalid("birthDate must be YYYY, YYYY-MM, or YYYY-MM-DD")
+		}
+	}
+	for _, extension := range p.Extension {
+		if extension.URL == "" || extension.ValueString == nil || *extension.ValueString == "" {
+			return Invalid("supported extensions require url and valueString")
+		}
+	}
+	return nil
+}
+
+// BEFORE: nonempty subject.reference and code.text checks inside CreateObservation.
+// NOW: check the supported status set, a meaningful coded/text concept, and a
+// valid local Patient reference. This app restricts subjects to local Patients;
+// it is not implementing every Observation possibility in the full specification.
+func (o Observation) Validate() error {
+	if err := resourceType(o.ResourceType, "Observation"); err != nil {
+		return err
+	}
+	if !oneOf(o.Status, "registered", "preliminary", "final", "amended", "corrected", "cancelled", "entered-in-error", "unknown") {
+		return Invalid("invalid or missing Observation.status")
+	}
+	if !o.Code.HasValue() {
+		return Invalid("observation requires code.text or code.coding.code")
+	}
+	_, err := PatientID(o.Subject.Reference)
+	return err
+}
+
+// BEFORE: creation only checked subject.reference and code.text.
+// NOW: also reject competing onset/abatement alternatives and inconsistent
+// supported statuses. Moving this to a method lets multiple operations reuse it.
+// These extra rules add behavior; a function extraction alone would not add them.
+func (c Condition) Validate() error {
+	if err := resourceType(c.ResourceType, "Condition"); err != nil {
+		return err
+	}
+	if _, err := PatientID(c.Subject.Reference); err != nil {
+		return err
+	}
+	if !c.Code.HasValue() {
+		return Invalid("condition requires code.text or code.coding.code")
+	}
+	if count(c.OnsetDateTime != "", c.OnsetAge != nil, c.OnsetPeriod != nil, c.OnsetRange != nil, c.OnsetString != "") > 1 {
+		return Invalid("only one onset[x] value is allowed")
+	}
+	abated := count(c.AbatementDateTime != "", c.AbatementAge != nil, c.AbatementPeriod != nil, c.AbatementRange != nil, c.AbatementString != "")
+	if abated > 1 {
+		return Invalid("only one abatement[x] value is allowed")
+	}
+	if err := conditionStatus(c.ClinicalStatus, "http://terminology.hl7.org/CodeSystem/condition-clinical", "active", "recurrence", "relapse", "inactive", "remission", "resolved"); err != nil {
+		return err
+	}
+	if err := conditionStatus(c.VerificationStatus, "http://terminology.hl7.org/CodeSystem/condition-ver-status", "unconfirmed", "provisional", "differential", "confirmed", "refuted", "entered-in-error"); err != nil {
+		return err
+	}
+	if hasCoding(c.VerificationStatus, "http://terminology.hl7.org/CodeSystem/condition-ver-status", "entered-in-error") && c.ClinicalStatus != nil {
+		return Invalid("clinicalStatus must be absent for entered-in-error conditions")
+	}
+	if abated > 0 && !hasCoding(c.ClinicalStatus, "http://terminology.hl7.org/CodeSystem/condition-clinical", "inactive", "remission", "resolved") {
+		return Invalid("abated conditions require inactive, remission, or resolved clinicalStatus")
+	}
+	return nil
+}
+
+// NEW SHARED CHECK: validate a supplied status against the appropriate coding
+// system and list. A nil optional status is skipped; a supplied status is checked.
+// Extracting this avoids duplicating the same scan for the two status properties.
+func conditionStatus(concept *CodeableConcept, system string, allowed ...string) error {
+	if concept == nil {
+		return nil
+	}
+	if !hasCoding(concept, system, allowed...) {
+		return Invalid("status requires a valid code from %s", system)
+	}
+	for _, coding := range concept.Coding {
+		if coding.System == system && !oneOf(coding.Code, allowed...) {
+			return Invalid("invalid status code %q", coding.Code)
+		}
+	}
+	return nil
+}
+
+// TEACHING EQUIVALENT, not historical code: loop through the concept's codings,
+// and return true if both the system and an allowed code match.
+// The helper hides that repeated loop; it does not fetch any external terminology.
+func hasCoding(concept *CodeableConcept, system string, codes ...string) bool {
+	if concept == nil {
+		return false
+	}
+	for _, coding := range concept.Coding {
+		if coding.System == system && oneOf(coding.Code, codes...) {
+			return true
+		}
+	}
+	return false
+}
+
+// TEACHING EQUIVALENT, not historical code:
+// if value == "male" || value == "female" || value == "other" || value == "unknown" { ... }
+// NOW: pass the allowed strings to this loop. choices ...string accepts any number
+// of strings. The helper is optional; explicit comparisons are perfectly valid.
+func oneOf(value string, choices ...string) bool {
+	for _, choice := range choices {
+		if value == choice {
+			return true
+		}
+	}
+	return false
+}
+
+// NEW HELPER: count how many supplied conditions are true. count(a != nil,
+// b != nil) > 1 means both alternatives were supplied. An explicit if checking
+// a != nil && b != nil would work too. This helper also handles longer choice lists.
+// This is an organization choice, not a Go requirement.
+func count(values ...bool) int {
+	n := 0
+	for _, value := range values {
+		if value {
+			n++
+		}
+	}
+	return n
+}
+
+// Validate covers the required fields and choices in the supported R4 subset.
+// BEFORE: MedicationRequest had fields only, with no validator.
+// NOW: core required values and modeled choices can be checked before we build
+// persistence/endpoints. This does not create a MedicationRequest API by itself.
+// The count helper rejects both-present/neither-present medication alternatives;
+// a few explicit if statements could enforce the same rule without extraction.
+func (m MedicationRequest) Validate() error {
+	if err := resourceType(m.ResourceType, "MedicationRequest"); err != nil {
+		return err
+	}
+	if !oneOf(m.Status, "active", "on-hold", "cancelled", "completed", "entered-in-error", "stopped", "draft", "unknown") {
+		return Invalid("invalid or missing MedicationRequest.status")
+	}
+	if !oneOf(m.Intent, "proposal", "plan", "order", "original-order", "reflex-order", "filler-order", "instance-order", "option") {
+		return Invalid("invalid or missing MedicationRequest.intent")
+	}
+	if _, err := PatientID(m.Subject.Reference); err != nil {
+		return err
+	}
+	if count(m.MedicationCodeableConcept != nil, m.MedicationReference != nil) != 1 {
+		return Invalid("exactly one medication[x] value is required")
+	}
+	if m.MedicationCodeableConcept != nil && !m.MedicationCodeableConcept.HasValue() {
+		return Invalid("medicationCodeableConcept must contain a code or text")
+	}
+	if m.MedicationReference != nil && m.MedicationReference.Reference == "" {
+		return Invalid("medicationReference.reference is required")
+	}
+	if count(m.ReportedBoolean != nil, m.ReportedReference != nil) > 1 {
+		return Invalid("only one reported[x] value is allowed")
+	}
+	if m.Substitution != nil && count(m.Substitution.AllowedBoolean != nil, m.Substitution.AllowedCodeableConcept != nil) != 1 {
+		return Invalid("substitution requires exactly one allowed[x] value")
+	}
+	for _, dosage := range m.DosageInstruction {
+		if count(dosage.AsNeededBoolean != nil, dosage.AsNeededCodeableConcept != nil) > 1 {
+			return Invalid("only one asNeeded[x] value is allowed")
+		}
+		if dosage.Timing != nil && dosage.Timing.Repeat != nil {
+			r := dosage.Timing.Repeat
+			if count(r.BoundsDuration != nil, r.BoundsRange != nil, r.BoundsPeriod != nil) > 1 {
+				return Invalid("only one bounds[x] value is allowed")
+			}
+		}
+		for _, dose := range dosage.DoseAndRate {
+			if count(dose.DoseRange != nil, dose.DoseQuantity != nil) > 1 || count(dose.RateRatio != nil, dose.RateRange != nil, dose.RateQuantity != nil) > 1 {
+				return Invalid("only one dose[x] and one rate[x] value are allowed")
+			}
+		}
+	}
+	return nil
+}
