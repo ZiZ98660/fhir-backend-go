@@ -71,8 +71,19 @@ func main() {
 	}
 	// One configured synthetic source for this first slice. Scope never comes
 	// from incoming JSON; this does not provide multi-tenant authorization.
+	integrationService := integration.NewService(integration.NewPostgresStore(pool))
+	emrAURL := os.Getenv("EMR_A_URL")
+	if emrAURL == "" {
+		emrAURL = "http://localhost:8081/fhir"
+	}
+	integrationService.RegisterConnector(integration.NewHTTPConnector(
+		"simulated-emr-a",
+		emrAURL,
+		os.Getenv("EMR_A_TOKEN"),
+		nil,
+	))
 	integrationHandler := handler.NewIntegrationHandler(
-		integration.NewService(integration.NewPostgresStore(pool)),
+		integrationService,
 		integration.Scope{TenantID: "synthetic-demo", SourceID: "synthetic-lis"},
 	)
 

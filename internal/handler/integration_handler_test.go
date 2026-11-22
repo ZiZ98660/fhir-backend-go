@@ -37,6 +37,9 @@ func (s *intakeStore) Get(_ context.Context, scope integration.Scope, id string)
 func (s *intakeStore) Transform(context.Context, integration.Scope, string) (json.RawMessage, error) {
 	return nil, s.failure
 }
+func (s *intakeStore) Deliver(context.Context, integration.Scope, string, integration.Connector) (integration.DeliveryResult, error) {
+	return integration.DeliveryResult{StatusCode: 200, ResponseBody: `{"status":"ok"}`}, s.failure
+}
 
 func TestIntegrationIntakeHTTP(t *testing.T) {
 	raw, err := os.ReadFile("../../testdata/integration/synthetic-result.json")
@@ -95,5 +98,19 @@ func TestIntegrationIntakeHTTP(t *testing.T) {
 	w = request("POST", "/api/v1/integration/results", "test-token", "application/json", raw)
 	if w.Code != 500 || strings.Contains(w.Body.String(), "secret") {
 		t.Fatal("storage details leaked")
+	}
+
+	// Test deliver endpoint
+	store.failure = nil
+	svc := integration.NewService(store)
+	svc.RegisterConnector(integration.NewHTTPConnector("simulated-emr-a", "http://example.com", "", nil))
+	hDeliver := NewIntegrationHandler(svc, scope)
+	protectedDeliver := middleware.AuthMiddleware("test-token", hDeliver.HandleResults)
+	rDeliver := httptest.NewRequest("POST", "/api/v1/integration/results/msg-test/$deliver", nil)
+	rDeliver.Header.Set("Authorization", "Bearer test-token")
+	wDeliver := httptest.NewRecorder()
+	protectedDeliver(wDeliver, rDeliver)
+	if wDeliver.Code != 200 {
+		t.Fatalf("deliver endpoint failed with status %d: %s", wDeliver.Code, wDeliver.Body.String())
 	}
 }

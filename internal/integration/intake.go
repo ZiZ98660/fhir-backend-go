@@ -47,13 +47,15 @@ type NumericValue struct {
 var numericPattern = regexp.MustCompile(`^-?(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$`)
 
 type Receipt struct {
-	ID                 string     `json:"id"`
-	State              string     `json:"state"`
-	Reason             string     `json:"reason,omitempty"`
-	ReceivedAt         time.Time  `json:"receivedAt"`
-	ObservationID      string     `json:"observationId,omitempty"`
-	DiagnosticReportID string     `json:"diagnosticReportId,omitempty"`
-	TransformedAt      *time.Time `json:"transformedAt,omitempty"`
+	ID                 string          `json:"id"`
+	State              string          `json:"state"`
+	Reason             string          `json:"reason,omitempty"`
+	ReceivedAt         time.Time       `json:"receivedAt"`
+	ObservationID      string          `json:"observationId,omitempty"`
+	DiagnosticReportID string          `json:"diagnosticReportId,omitempty"`
+	TransformedAt      *time.Time      `json:"transformedAt,omitempty"`
+	DeliveredAt        *time.Time      `json:"deliveredAt,omitempty"`
+	DeliveryResult     *DeliveryResult `json:"deliveryResult,omitempty"`
 }
 
 type Submission struct {
@@ -69,11 +71,39 @@ type Store interface {
 	Receive(context.Context, Scope, Submission) (Receipt, bool, error)
 	Get(context.Context, Scope, string) (Receipt, error)
 	Transform(context.Context, Scope, string) (json.RawMessage, error)
+	Deliver(context.Context, Scope, string, Connector) (DeliveryResult, error)
 }
 
-type Service struct{ store Store }
+type Service struct {
+	store      Store
+	connectors map[string]Connector
+}
 
-func NewService(store Store) *Service { return &Service{store: store} }
+func NewService(store Store) *Service {
+	return &Service{
+		store:      store,
+		connectors: make(map[string]Connector),
+	}
+}
+
+func (s *Service) RegisterConnector(connector Connector) {
+	s.connectors[connector.Destination()] = connector
+}
+
+func (s *Service) Deliver(ctx context.Context, scope Scope, id string, destination ...string) (DeliveryResult, error) {
+	if !internal.ValidID(id) || !internal.ValidID(scope.TenantID) || !internal.ValidID(scope.SourceID) {
+		return DeliveryResult{}, internal.Invalid("invalid integration receipt or scope")
+	}
+	target := "simulated-emr-a"
+	if len(destination) > 0 && destination[0] != "" {
+		target = destination[0]
+	}
+	connector, ok := s.connectors[target]
+	if !ok {
+		return DeliveryResult{}, fmt.Errorf("%w: connector for destination %q not configured", internal.ErrNotFound, target)
+	}
+	return s.store.Deliver(ctx, scope, id, connector)
+}
 
 func (s *Service) Submit(ctx context.Context, scope Scope, raw []byte) (Receipt, bool, error) {
 	if !internal.ValidID(scope.TenantID) || !internal.ValidID(scope.SourceID) {

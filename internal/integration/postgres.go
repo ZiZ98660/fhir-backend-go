@@ -217,8 +217,115 @@ func (s *PostgresStore) Transform(ctx context.Context, scope Scope, id string) (
 	if _, err := tx.Exec(ctx, `INSERT INTO integration_events (message_id,event_type) VALUES ($1,'transformed')`, receiptID); err != nil {
 		return nil, err
 	}
+
+	// Transactional Outbox Pattern: enqueues outbound delivery within the same
+	// transaction as the transformation. Delivery is guaranteed to be retried
+	// if the process terminates before or during outbound delivery.
+	jobID := "del-" + rand.Text()
+	_, err = tx.Exec(ctx, `INSERT INTO integration_delivery_jobs
+		(id, message_id, tenant_id, source_id, destination, payload, state)
+		VALUES ($1, $2, $3, $4, 'simulated-emr-a', $5, 'pending')
+		ON CONFLICT (tenant_id, source_id, message_id, destination) DO NOTHING`,
+		jobID, receiptID, scope.TenantID, scope.SourceID, []byte(bundle))
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO integration_events (message_id,event_type) VALUES ($1,'delivery_enqueued')`, receiptID); err != nil {
+		return nil, err
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return bundle, nil
+}
+
+// Deliver executes outbound delivery to an external EMR via the Connector interface.
+// If already delivered, it returns the recorded response idempotently.
+// If the delivery attempt fails, attempts are tracked durably for safe retry.
+func (s *PostgresStore) Deliver(ctx context.Context, scope Scope, id string, connector Connector) (DeliveryResult, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return DeliveryResult{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var jobID, state string
+	var payload []byte
+	var attemptCount, maxAttempts int
+	var respStatus pgtype.Int4
+	var respBody pgtype.Text
+
+	err = tx.QueryRow(ctx, `SELECT id, state, payload, attempt_count, max_attempts, response_status, response_body
+		FROM integration_delivery_jobs
+		WHERE message_id=$1 AND tenant_id=$2 AND source_id=$3 AND destination=$4 FOR UPDATE`,
+		id, scope.TenantID, scope.SourceID, connector.Destination()).Scan(
+		&jobID, &state, &payload, &attemptCount, &maxAttempts, &respStatus, &respBody,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return DeliveryResult{}, internal.ErrNotFound
+	}
+	if err != nil {
+		return DeliveryResult{}, err
+	}
+
+	// Idempotent replay: if already successfully delivered, return the recorded response.
+	if state == "delivered" {
+		return DeliveryResult{
+			StatusCode:   int(respStatus.Int32),
+			ResponseBody: respBody.String,
+		}, nil
+	}
+
+	if state == "failed" && attemptCount >= maxAttempts {
+		return DeliveryResult{}, fmt.Errorf("%w: delivery exceeded maximum attempts", internal.ErrConflict)
+	}
+
+	// Outbound delivery over the connector interface
+	attemptCount++
+	res, deliverErr := connector.Deliver(ctx, payload)
+	now := time.Now().UTC()
+
+	if deliverErr == nil {
+		_, err = tx.Exec(ctx, `UPDATE integration_delivery_jobs
+			SET state='delivered', delivered_at=$2, last_attempt_at=$2,
+				attempt_count=$3, response_status=$4, response_body=$5, last_error=NULL
+			WHERE id=$1`, jobID, now, attemptCount, res.StatusCode, res.ResponseBody)
+		if err != nil {
+			return DeliveryResult{}, err
+		}
+
+		if _, err := tx.Exec(ctx, `INSERT INTO integration_events (message_id, event_type) VALUES ($1, 'delivered')`, id); err != nil {
+			return DeliveryResult{}, err
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return DeliveryResult{}, err
+		}
+		return res, nil
+	}
+
+	// Delivery failed: update attempts and error details
+	newState := "pending"
+	if attemptCount >= maxAttempts {
+		newState = "failed"
+	}
+
+	_, err = tx.Exec(ctx, `UPDATE integration_delivery_jobs
+		SET state=$2, last_attempt_at=$3, attempt_count=$4, response_status=$5, response_body=$6, last_error=$7
+		WHERE id=$1`, jobID, newState, now, attemptCount, res.StatusCode, res.ResponseBody, deliverErr.Error())
+	if err != nil {
+		return DeliveryResult{}, err
+	}
+
+	if _, err := tx.Exec(ctx, `INSERT INTO integration_events (message_id, event_type) VALUES ($1, 'delivery_failed')`, id); err != nil {
+		return DeliveryResult{}, err
+	}
+
+	// Commit attempt metadata so failures and retries are recorded durably
+	if err := tx.Commit(ctx); err != nil {
+		return DeliveryResult{}, err
+	}
+
+	return res, deliverErr
 }

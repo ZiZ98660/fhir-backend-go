@@ -37,6 +37,9 @@ func (s *captureStore) Get(context.Context, Scope, string) (Receipt, error) {
 func (s *captureStore) Transform(context.Context, Scope, string) (json.RawMessage, error) {
 	return nil, internal.ErrConflict
 }
+func (s *captureStore) Deliver(context.Context, Scope, string, Connector) (DeliveryResult, error) {
+	return DeliveryResult{StatusCode: 200}, nil
+}
 
 func TestIntakePreservesIdentifiersDecimalsAndRawInput(t *testing.T) {
 	raw := sample(t)

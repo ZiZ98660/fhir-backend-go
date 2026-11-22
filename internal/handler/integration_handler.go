@@ -68,6 +68,23 @@ func (h *IntegrationHandler) HandleResults(w http.ResponseWriter, r *http.Reques
 		_, _ = w.Write(bundle)
 		return
 	}
+	if strings.HasSuffix(path, "/$deliver") {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, "POST")
+			return
+		}
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/"), "/$deliver")
+		destination := r.URL.Query().Get("destination")
+		result, err := h.service.Deliver(r.Context(), h.scope, id, destination)
+		if err != nil {
+			integrationError(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(result)
+		return
+	}
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, "GET")
 		return

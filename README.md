@@ -1,17 +1,17 @@
-# Step 5: FHIR Laboratory Transformation Bundle
+# Step 6: Outbox Pattern & EMR Connectors
 
-This branch adds the transformation engine that converts accepted synthetic lab receipts (`ready_for_transformation`) into deterministic, standard FHIR R4 Transaction Bundles.
+This branch introduces reliable outbound delivery to an external EMR using the Transactional Outbox pattern, Go interfaces for connectors, and simulated EMR testing with `net/http/httptest`.
 
 ## Architectural Concepts
-- **Deterministic Resource IDs & UUIDs (`internal/integration/transform.go`):** Computes reproducible IDs and RFC 4122 version-5 UUIDs (`urn:uuid:...`) so identical submissions produce identical bundles without creating duplicate clinical entities.
-- **Atomic FHIR Transaction Bundle:** Packages a validated `Observation` and `DiagnosticReport` using `PUT` entries, linking the report's `result` reference directly to the observation.
-- **Safe Live Verification:** Rechecks that the matched Patient exists and is not soft-deleted (`p.deleted_at IS NULL`) before generating FHIR resources.
-- **Schema Migration `002_lab_transformations.sql`:** Stores the generated bundle (`transformation_bundle BYTEA`), updates message state constraints (`transformed`), and enforces non-null references.
-- **Transformation Endpoint:** `POST /api/v1/integration/results/{id}/$transform` in `internal/handler/integration_handler.go`.
+- **Transactional Outbox (`internal/migrations/003_integration_outbox.sql`):** When a receipt is transformed, an outbound delivery job is atomically enqueued into `integration_delivery_jobs` in the *same* database transaction as the transformation. Delivery is guaranteed to be retried if the process terminates before or during outbound delivery.
+- **Connector Interface (`internal/integration/connector.go`):** `Connector` defines `Deliver(ctx, bundle) (DeliveryResult, error)`. This decouples the core engine from external EMR quirks, authentication headers, and network protocols.
+- **HTTP Connector (`HTTPConnector`):** Implements `Connector` over HTTP, adding `Content-Type: application/fhir+json`, Bearer authentication, and bounded response reading.
+- **Simulated EMR with `httptest` (`internal/integration/connector_test.go`):** Uses standard library `httptest.Server` to mock an external hospital EMR, asserting that the emitted FHIR transaction bundle is received correctly.
+- **Delivery Endpoint:** `POST /api/v1/integration/results/{id}/$deliver?destination=simulated-emr-a`.
 
-## How to Compare with Step 4
+## How to Compare with Step 5
 ```sh
-git diff step-04-integration-intake
+git diff step-05-fhir-transformation
 ```
 
 ## How to Test and Run
