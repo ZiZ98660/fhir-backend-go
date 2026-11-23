@@ -1,0 +1,51 @@
+$kind: collection
+name: go-fhir-phase1 FHIR R4 API
+description: |-
+  FHIR R4 learning server (go-fhir-phase1).
+
+  All routes except GET /health require a Bearer token supplied via the
+  Authorization header.  Set the `apiToken` collection variable (or the
+  environment variable of the same name) before running requests.
+
+  Base URL: http://localhost:8080  (override with the `baseUrl` variable)
+
+  Resources
+  - Patient   – FHIR R4 Patient CRUD + history
+  - Observation – FHIR R4 Observation CRUD + history
+  - Condition – FHIR R4 Condition CRUD + history
+  - Integration – proprietary lab-result intake, transform, and deliver workflow
+  - Health    – liveness probe (no auth)
+auth:
+  - id: 9eeda746-14d6-4340-8a21-967d07009447
+    type: bearer
+    name: Bearer Token
+    credentials:
+      token: "{{apiToken}}"
+variables:
+  - key: baseUrl
+    value: http://localhost:8080
+    disabled: false
+  - key: patientId
+    value: pt-demo
+    disabled: false
+  - key: observationId
+    value: obs-demo
+    disabled: false
+  - key: conditionId
+    value: cond-demo
+    disabled: false
+  - key: receiptId
+    value: receipt-demo
+    disabled: false
+  - key: apiToken
+    value: ""
+    disabled: false
+  - key: bearer_token_0x1e
+    secret: true
+    disabled: true
+    source:
+      provider: postman
+      postman:
+        type: cloud
+        secretId: 85a3378e-aaf5-485f-bd99-243ade591795
+        vaultId: 300e1b7c-cab5-42a1-8bbf-b58dc4afb668

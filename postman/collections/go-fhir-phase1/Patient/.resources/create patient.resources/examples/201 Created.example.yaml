@@ -1,0 +1,34 @@
+$kind: http-example
+name: '201 Created'
+request:
+  url: '{{baseUrl}}/api/v1/Patient'
+  method: POST
+response:
+  statusCode: 201
+  statusText: Created
+  headers:
+    - key: Content-Type
+      value: application/fhir+json
+    - key: Location
+      value: '{{baseUrl}}/api/v1/Patient/pt-abc123'
+    - key: ETag
+      value: 'W/"1"'
+  body:
+    type: json
+    content: |-
+      {
+        "resourceType": "Patient",
+        "id": "pt-abc123",
+        "meta": {
+          "versionId": "1",
+          "lastUpdated": "2026-11-23T01:00:00Z"
+        },
+        "active": true,
+        "name": [{"use": "official", "family": "Smith", "given": ["John"]}],
+        "gender": "male",
+        "birthDate": "1985-04-12",
+        "identifier": [
+          {"system": "https://example.org/synthetic-lis/patients", "value": "00001"}
+        ]
+      }
+order: 1000

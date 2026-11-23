@@ -1,0 +1,25 @@
+$kind: http-example
+name: '409 Conflict - Changed Content'
+request:
+  url: '{{baseUrl}}/api/v1/integration/results'
+  method: POST
+response:
+  statusCode: 409
+  statusText: Conflict
+  headers:
+    - key: Content-Type
+      value: application/fhir+json
+  body:
+    type: json
+    content: |-
+      {
+        "resourceType": "OperationOutcome",
+        "issue": [
+          {
+            "severity": "error",
+            "code": "conflict",
+            "diagnostics": "resource conflict"
+          }
+        ]
+      }
+order: 3000

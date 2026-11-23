@@ -1,0 +1,67 @@
+$kind: http-request
+name: 'Create Patient'
+method: POST
+url: '{{baseUrl}}/api/v1/Patient'
+order: 1000
+description: |-
+  Create a new FHIR R4 Patient resource.
+
+  - Content-Type must be `application/fhir+json` or `application/json`.
+  - `resourceType` must be `"Patient"`.
+  - `gender` (if supplied) must be one of: male, female, other, unknown.
+  - `birthDate` (if supplied) must be YYYY, YYYY-MM, or YYYY-MM-DD.
+  - Extensions require both `url` and `valueString`.
+  - Unknown JSON fields are rejected (strict decoding).
+  - Body limit: 1 MiB.
+
+  Returns 201 Created with a `Location` header pointing to the new resource URL,
+  `ETag: W/"1"`, and the created Patient in the body.
+headers:
+  - key: Content-Type
+    value: application/fhir+json
+body:
+  type: json
+  content: |-
+    {
+      "resourceType": "Patient",
+      "active": true,
+      "name": [
+        {
+          "use": "official",
+          "family": "Smith",
+          "given": ["John"]
+        }
+      ],
+      "gender": "male",
+      "birthDate": "1985-04-12",
+      "identifier": [
+        {
+          "system": "https://example.org/synthetic-lis/patients",
+          "value": "00001"
+        }
+      ],
+      "address": [
+        {
+          "line": ["123 Main St"],
+          "city": "Springfield",
+          "state": "IL",
+          "postalCode": "62701",
+          "country": "US"
+        }
+      ]
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      const res = pm.response;
+      pm.test("Status is 201 Created", () => pm.expect(res.code).to.equal(201));
+      pm.test("Location header present", () => pm.expect(res.headers.get("Location")).to.match(/\/api\/v1\/Patient\//));
+      pm.test("ETag is version 1", () => pm.expect(res.headers.get("ETag")).to.equal('W/"1"'));
+      pm.test("resourceType is Patient", () => {
+        const body = res.json();
+        pm.expect(body.resourceType).to.equal("Patient");
+        pm.expect(body.id).to.be.a("string").and.not.empty;
+        // Save the new ID for downstream requests
+        pm.collectionVariables.set("patientId", body.id);
+      });

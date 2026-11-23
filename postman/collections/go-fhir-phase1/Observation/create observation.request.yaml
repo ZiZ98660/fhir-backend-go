@@ -1,0 +1,76 @@
+$kind: http-request
+name: 'Create Observation'
+method: POST
+url: '{{baseUrl}}/api/v1/Observation'
+order: 1000
+description: |-
+  Create a new FHIR R4 Observation resource.
+
+  Required fields:
+  - `resourceType`: must be `"Observation"`
+  - `status`: one of registered, preliminary, final, amended, corrected, cancelled, entered-in-error, unknown
+  - `code`: must have `code.text` or at least one `code.coding[].code`
+  - `subject.reference`: must be `"Patient/{id}"`
+
+  Optional lab-specific fields:
+  - `identifier[].system` and `identifier[].value` (must use example.org namespace)
+  - `basedOn[].reference`: must be `"ServiceRequest/{id}"`
+  - `specimen.reference`: must be `"Specimen/{id}"`
+
+  Content-Type must be `application/fhir+json` or `application/json`.
+  Returns 201 Created with `Location`, `ETag: W/"1"`, and the created Observation.
+headers:
+  - key: Content-Type
+    value: application/fhir+json
+body:
+  type: json
+  content: |-
+    {
+      "resourceType": "Observation",
+      "identifier": [
+        {
+          "system": "https://example.org/synthetic-lis/results",
+          "value": "demo-result-1"
+        }
+      ],
+      "basedOn": [{"reference": "ServiceRequest/order-demo"}],
+      "status": "final",
+      "category": [
+        {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+              "code": "laboratory"
+            }
+          ]
+        }
+      ],
+      "code": {
+        "coding": [
+          {
+            "system": "https://example.org/fhir/CodeSystem/lab-tests",
+            "code": "SYN-GLU"
+          }
+        ]
+      },
+      "subject": {"reference": "Patient/{{patientId}}"},
+      "specimen": {"reference": "Specimen/specimen-demo"},
+      "effectiveDateTime": "2026-11-08T08:00:00Z",
+      "valueQuantity": {
+        "value": 5.20,
+        "unit": "mmol/L",
+        "system": "http://unitsofmeasure.org",
+        "code": "mmol/L"
+      }
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 201 Created", () => pm.expect(pm.response.code).to.equal(201));
+      pm.test("Location header present", () => pm.expect(pm.response.headers.get("Location")).to.match(/\/api\/v1\/Observation\//));
+      pm.test("resourceType is Observation", () => {
+        const body = pm.response.json();
+        pm.expect(body.resourceType).to.equal("Observation");
+        pm.collectionVariables.set("observationId", body.id);
+      });

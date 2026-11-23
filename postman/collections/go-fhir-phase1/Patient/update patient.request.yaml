@@ -1,0 +1,48 @@
+$kind: http-request
+name: 'Update Patient (PUT)'
+method: PUT
+url: '{{baseUrl}}/api/v1/Patient/{{patientId}}'
+order: 4000
+description: |-
+  Full replacement of an existing Patient resource (update-as-create is NOT supported).
+
+  - The `id` field in the body must match the path ID.
+  - `If-Match: W/"<version>"` is optional but recommended for optimistic concurrency.
+    If supplied and the version does not match the current resource, 412 is returned.
+  - Content-Type must be `application/fhir+json` or `application/json`.
+
+  Returns 200 OK with the updated resource, incremented `ETag`, and `Last-Modified`.
+headers:
+  - key: Content-Type
+    value: application/fhir+json
+  - key: If-Match
+    value: 'W/"1"'
+    description: 'Optional optimistic-concurrency guard. Use the ETag from the last read.'
+    disabled: true
+body:
+  type: json
+  content: |-
+    {
+      "resourceType": "Patient",
+      "id": "{{patientId}}",
+      "active": false,
+      "name": [
+        {
+          "use": "official",
+          "family": "Smith",
+          "given": ["John", "Michael"]
+        }
+      ],
+      "gender": "male",
+      "birthDate": "1985-04-12"
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200 OK", () => pm.expect(pm.response.code).to.equal(200));
+      pm.test("resourceType is Patient", () => {
+        const body = pm.response.json();
+        pm.expect(body.resourceType).to.equal("Patient");
+      });
+      pm.test("ETag incremented", () => pm.expect(pm.response.headers.get("ETag")).to.match(/^W\//));

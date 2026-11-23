@@ -1,0 +1,24 @@
+$kind: http-example
+name: '200 OK - Duplicate Submission'
+request:
+  url: '{{baseUrl}}/api/v1/integration/results'
+  method: POST
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    - key: Content-Type
+      value: application/json
+    - key: Location
+      value: '{{baseUrl}}/api/v1/integration/results/msg-abc123'
+  body:
+    type: json
+    content: |-
+      {
+        "id": "msg-abc123",
+        "state": "needs_reconciliation",
+        "reason": "patient-unmatched",
+        "receivedAt": "2026-11-23T01:00:00Z",
+        "duplicate": true
+      }
+order: 2000

@@ -1,0 +1,19 @@
+$kind: http-example
+name: '200 OK - Database Connected'
+request:
+  url: '{{baseUrl}}/health'
+  method: GET
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    - key: Content-Type
+      value: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "status": "up",
+        "database": "connected"
+      }
+order: 1000

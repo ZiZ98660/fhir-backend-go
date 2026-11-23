@@ -1,0 +1,14 @@
+$kind: collection
+name: Integration
+description: |-
+  Proprietary lab-result intake and delivery workflow.
+
+  This is NOT a FHIR endpoint. The request body uses Content-Type: application/json
+  (not application/fhir+json).
+
+  Supported operations:
+  - POST /api/v1/integration/results                       – submit a lab result
+  - GET  /api/v1/integration/results/{id}                  – read receipt metadata
+  - POST /api/v1/integration/results/{id}/$transform       – transform to FHIR R4 Bundle
+  - POST /api/v1/integration/results/{id}/$deliver         – deliver FHIR Bundle to EMR
+order: 5000

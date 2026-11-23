@@ -1,0 +1,21 @@
+$kind: http-request
+name: 'Delete Condition'
+method: DELETE
+url: '{{baseUrl}}/api/v1/Condition/{{conditionId}}'
+order: 6000
+description: |-
+  Soft-delete a Condition resource. Previous versions remain accessible via
+  the history endpoint. Subsequent reads return 410 Gone.
+
+  - `If-Match: W/"<version>"` is optional but recommended.
+  - Returns 204 No Content on success.
+headers:
+  - key: If-Match
+    value: 'W/"1"'
+    description: 'Optional optimistic-concurrency guard.'
+    disabled: true
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 204 No Content", () => pm.expect(pm.response.code).to.equal(204));

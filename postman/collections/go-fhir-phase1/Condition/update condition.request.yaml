@@ -1,0 +1,66 @@
+$kind: http-request
+name: 'Update Condition (PUT)'
+method: PUT
+url: '{{baseUrl}}/api/v1/Condition/{{conditionId}}'
+order: 4000
+description: |-
+  Full replacement of an existing Condition resource.
+
+  - The `id` field in the body must match the path ID.
+  - `If-Match: W/"<version>"` is optional but recommended.
+  - Content-Type must be `application/fhir+json` or `application/json`.
+
+  Returns 200 OK with the updated resource.
+headers:
+  - key: Content-Type
+    value: application/fhir+json
+  - key: If-Match
+    value: 'W/"1"'
+    description: 'Optional optimistic-concurrency guard.'
+    disabled: true
+body:
+  type: json
+  content: |-
+    {
+      "resourceType": "Condition",
+      "id": "{{conditionId}}",
+      "clinicalStatus": {
+        "coding": [
+          {
+            "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+            "code": "remission"
+          }
+        ]
+      },
+      "verificationStatus": {
+        "coding": [
+          {
+            "system": "http://terminology.hl7.org/CodeSystem/condition-ver-status",
+            "code": "confirmed"
+          }
+        ]
+      },
+      "code": {
+        "coding": [
+          {
+            "system": "http://snomed.info/sct",
+            "code": "44054006",
+            "display": "Diabetes mellitus type 2"
+          }
+        ],
+        "text": "Type 2 Diabetes Mellitus"
+      },
+      "subject": {"reference": "Patient/{{patientId}}"},
+      "onsetDateTime": "2020-01-15",
+      "abatementDateTime": "2026-06-01",
+      "recordedDate": "2020-01-20"
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200 OK", () => pm.expect(pm.response.code).to.equal(200));
+      pm.test("resourceType is Condition", () => {
+        const body = pm.response.json();
+        pm.expect(body.resourceType).to.equal("Condition");
+      });

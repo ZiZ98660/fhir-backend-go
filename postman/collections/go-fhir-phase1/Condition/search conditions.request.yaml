@@ -1,0 +1,26 @@
+$kind: http-request
+name: 'Search Conditions by Patient'
+method: GET
+url: '{{baseUrl}}/api/v1/Condition?patient={{patientId}}'
+order: 2000
+description: |-
+  Search for Condition resources belonging to a specific patient.
+
+  Query parameter:
+  - `patient` (required) – Patient ID or `Patient/{id}` reference
+
+  Returns a FHIR R4 Bundle of type `searchset`.
+queryParams:
+  - key: patient
+    value: '{{patientId}}'
+    description: 'Patient ID or Patient/{id} reference'
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200 OK", () => pm.expect(pm.response.code).to.equal(200));
+      pm.test("Response is a FHIR Bundle", () => {
+        const body = pm.response.json();
+        pm.expect(body.resourceType).to.equal("Bundle");
+        pm.expect(body.type).to.equal("searchset");
+      });

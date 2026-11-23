@@ -1,0 +1,18 @@
+$kind: http-request
+name: 'Get Observation Version'
+method: GET
+url: '{{baseUrl}}/api/v1/Observation/{{observationId}}/_history/1'
+order: 8000
+description: |-
+  Retrieve a specific historical version of an Observation resource.
+
+  Replace `1` in the path with the desired version ID.
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200 OK", () => pm.expect(pm.response.code).to.equal(200));
+      pm.test("resourceType is Observation", () => {
+        const body = pm.response.json();
+        pm.expect(body.resourceType).to.equal("Observation");
+      });

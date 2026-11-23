@@ -1,0 +1,21 @@
+$kind: http-request
+name: 'Get Condition History'
+method: GET
+url: '{{baseUrl}}/api/v1/Condition/{{conditionId}}/_history'
+order: 7000
+description: |-
+  Retrieve the full version history of a Condition resource as a FHIR Bundle
+  of type `history`.
+
+  Note: `_count`, `_since`, `_at`, and `_list` query parameters are not yet
+  supported and will return 400 Bad Request.
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200 OK", () => pm.expect(pm.response.code).to.equal(200));
+      pm.test("Response is a FHIR history Bundle", () => {
+        const body = pm.response.json();
+        pm.expect(body.resourceType).to.equal("Bundle");
+        pm.expect(body.type).to.equal("history");
+      });

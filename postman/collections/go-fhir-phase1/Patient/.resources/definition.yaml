@@ -1,0 +1,15 @@
+$kind: collection
+name: Patient
+description: |-
+  FHIR R4 Patient resource endpoints.
+
+  Supported operations:
+  - POST   /api/v1/Patient              – create
+  - GET    /api/v1/Patient              – search (identifier, search query params)
+  - GET    /api/v1/Patient/{id}         – read by ID
+  - PUT    /api/v1/Patient/{id}         – full replacement (If-Match optional)
+  - PATCH  /api/v1/Patient/{id}         – JSON Patch (RFC 6902, If-Match optional)
+  - DELETE /api/v1/Patient/{id}         – soft-delete (If-Match optional)
+  - GET    /api/v1/Patient/{id}/_history          – version history bundle
+  - GET    /api/v1/Patient/{id}/_history/{version} – specific version
+order: 2000

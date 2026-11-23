@@ -1,0 +1,25 @@
+$kind: http-example
+name: '400 Bad Request - Validation Error'
+request:
+  url: '{{baseUrl}}/api/v1/Patient'
+  method: POST
+response:
+  statusCode: 400
+  statusText: Bad Request
+  headers:
+    - key: Content-Type
+      value: application/fhir+json
+  body:
+    type: json
+    content: |-
+      {
+        "resourceType": "OperationOutcome",
+        "issue": [
+          {
+            "severity": "error",
+            "code": "invalid",
+            "diagnostics": "invalid Patient.gender"
+          }
+        ]
+      }
+order: 2000

@@ -1,5 +1,6 @@
 # Binaries
 bin/
+server
 *.exe
 *.dll
 *.so
@@ -7,6 +8,9 @@ bin/
 
 # Environment variables
 .env
+
+# Postman local config
+.postman/
 
 # IDEs
 .vscode/

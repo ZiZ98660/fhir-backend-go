@@ -1,0 +1,28 @@
+$kind: http-request
+name: 'Get Receipt'
+method: GET
+url: '{{baseUrl}}/api/v1/integration/results/{{receiptId}}'
+order: 2000
+description: |-
+  Read receipt metadata for a previously submitted lab result.
+
+  Returns the receipt state and workflow metadata. The original payload is NOT
+  returned (it is stored separately for privacy reasons).
+
+  Receipt states:
+  - `needs_reconciliation` – patient or order mapping not found at intake time
+  - `ready_for_transformation` – mappings existed; ready to call $transform
+  - `transformed` – FHIR Bundle has been created
+  - `delivered` – Bundle has been sent to the configured EMR
+
+  Returns 200 OK with the receipt JSON, or 404 if not found.
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200 OK", () => pm.expect(pm.response.code).to.equal(200));
+      pm.test("Receipt has id and state", () => {
+        const body = pm.response.json();
+        pm.expect(body.id).to.be.a("string").and.not.empty;
+        pm.expect(body.state).to.be.a("string").and.not.empty;
+      });

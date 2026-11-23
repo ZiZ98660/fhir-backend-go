@@ -1,0 +1,37 @@
+$kind: http-request
+name: 'Transform Result to FHIR Bundle'
+method: POST
+url: '{{baseUrl}}/api/v1/integration/results/{{receiptId}}/$transform'
+order: 3000
+description: |-
+  Transform a received lab result into a FHIR R4 transaction Bundle.
+
+  Prerequisites:
+  - The receipt must be in `ready_for_transformation` state (patient and order
+    mappings must exist in the FHIR store).
+  - The transform endpoint revalidates live Patient and mapping data before
+    creating resources.
+
+  The response is a FHIR R4 Bundle of type `transaction` containing:
+  - An `Observation` resource with the measured quantity
+  - A `DiagnosticReport` resource whose `result` references the Observation
+
+  The Bundle uses stable resource IDs (PUT semantics), so retrying returns the
+  same Bundle rather than generating new IDs.
+
+  Returns 200 OK with `Content-Type: application/fhir+json`.
+  Returns 400 if mappings are missing or validation fails.
+  Returns 404 if the receipt does not exist.
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200 OK", () => pm.expect(pm.response.code).to.equal(200));
+      pm.test("Response is a FHIR Bundle", () => {
+        const body = pm.response.json();
+        pm.expect(body.resourceType).to.equal("Bundle");
+        pm.expect(body.type).to.equal("transaction");
+      });
+      pm.test("Content-Type is application/fhir+json", () => {
+        pm.expect(pm.response.headers.get("Content-Type")).to.include("application/fhir+json");
+      });

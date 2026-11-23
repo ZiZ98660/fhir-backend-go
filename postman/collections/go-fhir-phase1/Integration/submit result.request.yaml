@@ -1,0 +1,75 @@
+$kind: http-request
+name: 'Submit Lab Result'
+method: POST
+url: '{{baseUrl}}/api/v1/integration/results'
+order: 1000
+description: |-
+  Submit a synthetic lab result for intake.
+
+  This is a proprietary application contract, NOT a FHIR endpoint.
+  Content-Type must be `application/json` (NOT application/fhir+json).
+
+  The server validates:
+  - All required fields present (messageId, resultId, patientIdentifier, orderIdentifier, test, value, status, effectiveDateTime)
+  - `status` must be `"final"` (only final results accepted in this slice)
+  - `test.code` must be `"SYN-GLU"` from `https://example.org/fhir/CodeSystem/lab-tests`
+  - `value.unit` must be `"mmol/L"` with UCUM system
+  - `effectiveDateTime` must include timezone offset
+  - Numeric value: max 18 integer digits, 12 fractional digits, no scientific notation
+  - No NUL characters, invalid UTF-8, or Unicode replacement characters
+
+  Responses:
+  - 202 Accepted (new receipt) – includes `Location` header and `duplicate: false`
+  - 200 OK (duplicate messageId with identical content) – includes `duplicate: true`
+  - 409 Conflict – same messageId but different content
+  - 400 Bad Request – validation failure
+  - 415 Unsupported Media Type – wrong Content-Type
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "messageId": "demo-message-1",
+      "resultId": "demo-result-1",
+      "patientIdentifier": {
+        "system": "https://example.org/synthetic-lis/patients",
+        "value": "00001"
+      },
+      "orderIdentifier": {
+        "system": "https://example.org/synthetic-lis/orders",
+        "value": "SYN-ORDER-1"
+      },
+      "test": {
+        "system": "https://example.org/fhir/CodeSystem/lab-tests",
+        "code": "SYN-GLU",
+        "display": "Synthetic numeric glucose scenario"
+      },
+      "value": {
+        "value": 5.20,
+        "unit": "mmol/L",
+        "system": "http://unitsofmeasure.org",
+        "code": "mmol/L"
+      },
+      "status": "final",
+      "effectiveDateTime": "2026-11-08T09:00:00+01:00"
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      const code = pm.response.code;
+      pm.test("Status is 202 Accepted or 200 OK (duplicate)", () => {
+        pm.expect([200, 202]).to.include(code);
+      });
+      if (code === 202 || code === 200) {
+        pm.test("Location header present", () => {
+          pm.expect(pm.response.headers.get("Location")).to.match(/\/api\/v1\/integration\/results\//);
+        });
+        pm.test("Receipt ID returned", () => {
+          const body = pm.response.json();
+          pm.expect(body.id).to.be.a("string").and.not.empty;
+          pm.collectionVariables.set("receiptId", body.id);
+        });
+      }

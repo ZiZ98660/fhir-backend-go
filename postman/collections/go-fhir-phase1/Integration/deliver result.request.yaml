@@ -1,0 +1,40 @@
+$kind: http-request
+name: 'Deliver Result to EMR'
+method: POST
+url: '{{baseUrl}}/api/v1/integration/results/{{receiptId}}/$deliver'
+order: 4000
+description: |-
+  Deliver the transformed FHIR Bundle to a configured external EMR destination.
+
+  Query parameter:
+  - `destination` (optional) – connector name; defaults to `"simulated-emr-a"`
+
+  The server uses the Transactional Outbox pattern: the delivery job is enqueued
+  atomically with the transformation. This endpoint triggers the actual outbound
+  HTTP POST to the EMR's FHIR endpoint.
+
+  The EMR connector sends:
+  - `Content-Type: application/fhir+json`
+  - `Authorization: Bearer <EMR_A_TOKEN>`
+
+  Returns 200 OK with a `DeliveryResult` JSON object:
+  ```json
+  { "statusCode": 200, "responseBody": "..." }
+  ```
+
+  Returns 404 if the receipt or destination connector is not found.
+  Returns 400 if the receipt ID or scope is invalid.
+queryParams:
+  - key: destination
+    value: simulated-emr-a
+    description: 'Connector name. Defaults to simulated-emr-a if omitted.'
+    disabled: true
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200 OK", () => pm.expect(pm.response.code).to.equal(200));
+      pm.test("DeliveryResult has statusCode", () => {
+        const body = pm.response.json();
+        pm.expect(body.statusCode).to.be.a("number");
+      });

@@ -1,0 +1,4 @@
+$kind: collection
+name: Health
+description: Liveness probe – no authentication required.
+order: 1000

@@ -59,6 +59,17 @@ func (r *PatientRepository) InitTable(ctx context.Context) error {
 	if _, err := tx.Exec(ctx, `ALTER TABLE patients ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`); err != nil {
 		return err
 	}
+	// Automatically archive legacy non-FHIR prototype records that lack the R4 schema:
+	if _, err := tx.Exec(ctx, `UPDATE patients SET deleted_at = clock_timestamp()
+		WHERE deleted_at IS NULL AND (
+			data ? 'familyName'
+			OR data ? 'givenNames'
+			OR (data ? 'meta' AND data->'meta' ? 'versionId' AND jsonb_typeof(data->'meta'->'versionId') != 'string')
+			OR (data ? 'gender' AND jsonb_typeof(data->'gender') != 'string')
+			OR id = 'pt-fhir-123'
+		)`); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS patient_history (
 		sequence BIGSERIAL PRIMARY KEY,
 		patient_id TEXT NOT NULL REFERENCES patients(id),

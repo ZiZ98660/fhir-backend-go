@@ -1,0 +1,19 @@
+$kind: http-request
+name: 'Get Condition by ID'
+method: GET
+url: '{{baseUrl}}/api/v1/Condition/{{conditionId}}'
+order: 3000
+description: |-
+  Read a single Condition resource by its server-assigned ID.
+
+  Returns 200 OK with the Condition resource, `ETag`, and `Last-Modified` headers.
+  Returns 404 if not found, 410 Gone if deleted.
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200 OK", () => pm.expect(pm.response.code).to.equal(200));
+      pm.test("resourceType is Condition", () => {
+        const body = pm.response.json();
+        pm.expect(body.resourceType).to.equal("Condition");
+      });

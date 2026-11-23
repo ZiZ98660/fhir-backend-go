@@ -1,0 +1,36 @@
+$kind: http-request
+name: 'Patch Patient (JSON Patch)'
+method: PATCH
+url: '{{baseUrl}}/api/v1/Patient/{{patientId}}'
+order: 5000
+description: |-
+  Apply a JSON Patch (RFC 6902) to an existing Patient resource.
+
+  - Content-Type must be `application/json-patch+json`.
+  - `If-Match: W/"<version>"` is optional but recommended.
+  - The patch document is an array of operations (add, remove, replace, move, copy, test).
+
+  Returns 200 OK with the patched resource.
+headers:
+  - key: Content-Type
+    value: application/json-patch+json
+  - key: If-Match
+    value: 'W/"1"'
+    description: 'Optional optimistic-concurrency guard.'
+    disabled: true
+body:
+  type: json
+  content: |-
+    [
+      {"op": "replace", "path": "/active", "value": true},
+      {"op": "add",     "path": "/gender", "value": "other"}
+    ]
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200 OK", () => pm.expect(pm.response.code).to.equal(200));
+      pm.test("resourceType is Patient", () => {
+        const body = pm.response.json();
+        pm.expect(body.resourceType).to.equal("Patient");
+      });

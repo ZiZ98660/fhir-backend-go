@@ -1,0 +1,53 @@
+$kind: http-request
+name: 'Update Observation (PUT)'
+method: PUT
+url: '{{baseUrl}}/api/v1/Observation/{{observationId}}'
+order: 4000
+description: |-
+  Full replacement of an existing Observation resource.
+
+  - The `id` field in the body must match the path ID.
+  - `If-Match: W/"<version>"` is optional but recommended.
+  - Content-Type must be `application/fhir+json` or `application/json`.
+
+  Returns 200 OK with the updated resource.
+headers:
+  - key: Content-Type
+    value: application/fhir+json
+  - key: If-Match
+    value: 'W/"1"'
+    description: 'Optional optimistic-concurrency guard.'
+    disabled: true
+body:
+  type: json
+  content: |-
+    {
+      "resourceType": "Observation",
+      "id": "{{observationId}}",
+      "status": "amended",
+      "code": {
+        "coding": [
+          {
+            "system": "https://example.org/fhir/CodeSystem/lab-tests",
+            "code": "SYN-GLU"
+          }
+        ]
+      },
+      "subject": {"reference": "Patient/{{patientId}}"},
+      "effectiveDateTime": "2026-11-08T08:00:00Z",
+      "valueQuantity": {
+        "value": 5.50,
+        "unit": "mmol/L",
+        "system": "http://unitsofmeasure.org",
+        "code": "mmol/L"
+      }
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200 OK", () => pm.expect(pm.response.code).to.equal(200));
+      pm.test("resourceType is Observation", () => {
+        const body = pm.response.json();
+        pm.expect(body.resourceType).to.equal("Observation");
+      });

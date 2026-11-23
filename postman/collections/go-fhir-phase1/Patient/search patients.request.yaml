@@ -1,0 +1,33 @@
+$kind: http-request
+name: Search Patients
+method: GET
+url: "{{baseUrl}}/api/v1/Patient"
+order: 2000
+description: |-
+  Search for Patient resources.
+
+  Query parameters (both optional):
+  - `identifier` – match by identifier value (system|value or plain value)
+  - `search`     – free-text search term
+
+  Returns a FHIR R4 Bundle of type `searchset`.
+queryParams:
+  - key: identifier
+    value: ""
+    disabled: true
+    description: Identifier value, e.g. 00001
+  - key: search
+    value: ""
+    disabled: true
+    description: Free-text search term
+scripts:
+  - type: afterResponse
+    code: |-
+      pm.test("Status is 200 OK", function () {
+          pm.response.to.have.status(200);
+      });
+
+      pm.test("Response is a FHIR Bundle", function () {
+          var jsonData = pm.response.json();
+          pm.expect(jsonData.resourceType).to.eql("Bundle");
+      });

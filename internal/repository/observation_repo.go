@@ -40,6 +40,12 @@ func (r *ObservationRepository) InitTable(ctx context.Context) error {
 	if _, err := tx.Exec(ctx, `ALTER TABLE observations ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(ctx, `UPDATE observations SET deleted_at = clock_timestamp()
+		WHERE deleted_at IS NULL AND (
+			data ? 'meta' AND data->'meta' ? 'versionId' AND jsonb_typeof(data->'meta'->'versionId') != 'string'
+		)`); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS observation_history (
  sequence BIGSERIAL PRIMARY KEY,
  resource_id TEXT NOT NULL REFERENCES observations(id),

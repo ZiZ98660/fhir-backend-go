@@ -39,7 +39,7 @@ func main() {
 		log.Fatalf("Unable to connect to database: %v", err)
 	}
 	defer pool.Close()
-	startupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	startupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	if err := pool.Ping(startupCtx); err != nil {
 		log.Fatalf("Database connectivity check failed: %v", err)
@@ -67,8 +67,9 @@ func main() {
 		log.Fatalf("Failed to initialize condition table: %v", err)
 	}
 	if err := migrations.Apply(startupCtx, pool); err != nil {
-		log.Fatal("Failed to apply integration database migrations")
+		log.Fatalf("Failed to apply integration database migrations: %v", err)
 	}
+	seedIntegrationMappings(startupCtx, pool)
 	// One configured synthetic source for this first slice. Scope never comes
 	// from incoming JSON; this does not provide multi-tenant authorization.
 	integrationService := integration.NewService(integration.NewPostgresStore(pool))
@@ -106,4 +107,63 @@ func main() {
 	}
 	fmt.Println("FHIR R4 learning server running on http://localhost:8080")
 	log.Fatal(server.ListenAndServe())
+}
+
+func seedIntegrationMappings(ctx context.Context, pool *pgxpool.Pool) {
+	// Find the target patient ID (preferring patient with identifier 00001)
+	var targetPatientID string
+	err := pool.QueryRow(ctx, `
+		SELECT id FROM patients 
+		WHERE deleted_at IS NULL 
+		ORDER BY (CASE WHEN data @> '{"identifier":[{"value":"00001"}]}'::jsonb THEN 0 ELSE 1 END), id 
+		LIMIT 1
+	`).Scan(&targetPatientID)
+	if err != nil {
+		log.Printf("Notice: no active patient found to seed integration mappings: %v", err)
+		return
+	}
+
+	// 1. Seed patient mapping
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO integration_patient_mappings 
+			(tenant_id, source_id, identifier_system, identifier_value, patient_id)
+		VALUES 
+			('synthetic-demo', 'synthetic-lis', 'https://example.org/synthetic-lis/patients', '00001', $1)
+		ON CONFLICT (tenant_id, source_id, identifier_system, identifier_value)
+		DO UPDATE SET patient_id = EXCLUDED.patient_id
+	`, targetPatientID); err != nil {
+		log.Printf("Failed to seed integration patient mapping: %v", err)
+		return
+	}
+
+	// 2. Seed order mapping
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO integration_order_mappings 
+			(tenant_id, source_id, identifier_system, identifier_value, patient_id, order_key)
+		VALUES 
+			('synthetic-demo', 'synthetic-lis', 'https://example.org/synthetic-lis/orders', 'SYN-ORDER-1', $1, 'known-synthetic-order')
+		ON CONFLICT (tenant_id, source_id, identifier_system, identifier_value)
+		DO UPDATE SET patient_id = EXCLUDED.patient_id, order_key = EXCLUDED.order_key
+	`, targetPatientID); err != nil {
+		log.Printf("Failed to seed integration order mapping: %v", err)
+		return
+	}
+
+	// 3. Reconcile any existing integration messages that were stuck in needs_reconciliation
+	tag, err := pool.Exec(ctx, `
+		UPDATE integration_messages
+		SET state = 'ready_for_transformation',
+		    reason = '',
+		    patient_id = $1,
+		    order_key = 'known-synthetic-order'
+		WHERE state = 'needs_reconciliation'
+		  AND tenant_id = 'synthetic-demo'
+		  AND source_id = 'synthetic-lis'
+	`, targetPatientID)
+	if err != nil {
+		log.Printf("Failed to reconcile existing messages: %v", err)
+		return
+	}
+
+	log.Printf("Integration mappings initialized for patient %s (reconciled %d pending messages)", targetPatientID, tag.RowsAffected())
 }

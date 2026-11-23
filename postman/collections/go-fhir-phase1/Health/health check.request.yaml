@@ -1,0 +1,12 @@
+$kind: http-request
+name: 'Health Check'
+method: GET
+url: '{{baseUrl}}/health'
+order: 1000
+description: |-
+  Liveness probe. Pings the PostgreSQL connection pool with a 2-second deadline.
+
+  - 200 OK  → `{"status":"up","database":"connected"}`
+  - 503 Service Unavailable → `{"status":"down","database":"disconnected"}`
+
+  No Authorization header is required for this endpoint.

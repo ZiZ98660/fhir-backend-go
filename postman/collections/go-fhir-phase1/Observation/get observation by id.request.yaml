@@ -1,0 +1,19 @@
+$kind: http-request
+name: 'Get Observation by ID'
+method: GET
+url: '{{baseUrl}}/api/v1/Observation/{{observationId}}'
+order: 3000
+description: |-
+  Read a single Observation resource by its server-assigned ID.
+
+  Returns 200 OK with the Observation resource, `ETag`, and `Last-Modified` headers.
+  Returns 404 if not found, 410 Gone if deleted.
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("Status is 200 OK", () => pm.expect(pm.response.code).to.equal(200));
+      pm.test("resourceType is Observation", () => {
+        const body = pm.response.json();
+        pm.expect(body.resourceType).to.equal("Observation");
+      });
