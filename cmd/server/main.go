@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"go-fhir-phase1/internal/handler"
@@ -105,8 +108,61 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second,
 	}
-	fmt.Println("FHIR R4 learning server running on http://localhost:8080")
-	log.Fatal(server.ListenAndServe())
+
+	// Step 7: Background Delivery Worker autonomously polling & delivering jobs
+	worker := integration.NewWorker(pool, integrationService)
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	worker.Start(workerCtx)
+
+	// Step 8: HL7 v2 MLLP TCP listener on :2575 for lab devices & mobile test client
+	mllpAddr := os.Getenv("MLLP_ADDR")
+	if mllpAddr == "" {
+		mllpAddr = ":2575"
+	}
+	mllpServer := integration.NewMLLPServer(
+		mllpAddr,
+		integrationService,
+		integration.Scope{TenantID: "synthetic-demo", SourceID: "synthetic-lis"},
+	)
+	if err := mllpServer.Start(); err != nil {
+		log.Printf("Warning: could not bind MLLP listener on %s: %v", mllpAddr, err)
+	} else {
+		fmt.Printf("HL7 v2 MLLP device listener running on %s\n", mllpAddr)
+	}
+
+	serverErr := make(chan error, 1)
+	go func() {
+		fmt.Println("FHIR R4 learning server running on http://localhost:8080")
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+	}()
+
+	// Signal trapping for zero-data-loss graceful shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+
+	select {
+	case err := <-serverErr:
+		log.Fatalf("Server startup failed: %v", err)
+	case sig := <-quit:
+		fmt.Printf("\nReceived signal %s, initiating graceful shutdown...\n", sig)
+	}
+
+	// 1. Drain incoming HTTP connections
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
+	}
+
+	// 2. Stop MLLP TCP listener
+	_ = mllpServer.Close()
+
+	// 3. Stop delivery worker and wait for in-flight tasks
+	workerCancel()
+	worker.Stop()
+	log.Println("Graceful shutdown complete.")
 }
 
 func seedIntegrationMappings(ctx context.Context, pool *pgxpool.Pool) {

@@ -305,15 +305,16 @@ func (s *PostgresStore) Deliver(ctx context.Context, scope Scope, id string, con
 		return res, nil
 	}
 
-	// Delivery failed: update attempts and error details
+	// Delivery failed: update attempts and error details with retry backoff
 	newState := "pending"
 	if attemptCount >= maxAttempts {
 		newState = "failed"
 	}
+	nextAttemptAt := now.Add(time.Duration(attemptCount*5) * time.Second)
 
 	_, err = tx.Exec(ctx, `UPDATE integration_delivery_jobs
-		SET state=$2, last_attempt_at=$3, attempt_count=$4, response_status=$5, response_body=$6, last_error=$7
-		WHERE id=$1`, jobID, newState, now, attemptCount, res.StatusCode, res.ResponseBody, deliverErr.Error())
+		SET state=$2, last_attempt_at=$3, next_attempt_at=$4, attempt_count=$5, response_status=$6, response_body=$7, last_error=$8
+		WHERE id=$1`, jobID, newState, now, nextAttemptAt, attemptCount, res.StatusCode, res.ResponseBody, deliverErr.Error())
 	if err != nil {
 		return DeliveryResult{}, err
 	}
